@@ -1,0 +1,137 @@
+from django.conf import settings
+from rest_framework import permissions, status
+from rest_framework.authentication import TokenAuthentication
+from rest_framework.authtoken.models import Token
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
+from .google_auth import GoogleAuthError, verify_google_id_token
+from .models import User
+from .serializers import CompleteProfileSerializer, GoogleLoginSerializer, UserSerializer
+
+
+def split_google_name(full_name):
+    """
+    Convert Google's single display name into first/last names.
+    This keeps Google login flow unchanged while matching our local schema.
+    """
+    cleaned_name = (full_name or "").strip()
+    if not cleaned_name:
+        return "", ""
+
+    parts = cleaned_name.split()
+    first_name = parts[0]
+    last_name = " ".join(parts[1:]) if len(parts) > 1 else ""
+    return first_name, last_name
+
+
+class GoogleLoginView(APIView):
+    """
+    Login/register endpoint for Google authentication.
+    """
+
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        serializer = GoogleLoginSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        validated = serializer.validated_data
+        google_email = ""
+        google_name = ""
+
+        if validated.get("id_token"):
+            try:
+                payload = verify_google_id_token(validated["id_token"])
+            except GoogleAuthError as exc:
+                return Response(
+                    {"success": False, "message": str(exc)},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            google_email = (payload.get("email") or "").lower()
+            google_name = (payload.get("name") or "").strip()
+        else:
+            # Fallback mode for local development if frontend sends decoded user info.
+            # Prefer id_token in production so the backend verifies authenticity.
+            google_user = validated.get("google_user", {})
+            google_email = (google_user.get("email") or "").lower()
+            google_name = (google_user.get("name") or google_user.get("full_name") or "").strip()
+
+        allowed_domain = getattr(settings, "ALLOWED_GOOGLE_DOMAIN", "@ua.edu.ph").lower()
+        if not google_email or not google_email.endswith(allowed_domain):
+            return Response(
+                {
+                    "success": False,
+                    "message": f"Only Google accounts ending with '{allowed_domain}' are allowed.",
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        first_name, last_name = split_google_name(google_name)
+
+        user, created = User.objects.get_or_create(
+            email=google_email,
+            defaults={
+                "first_name": first_name,
+                "last_name": last_name,
+                "role": User.Role.FACULTY,
+            },
+        )
+
+        if created:
+            user.set_unusable_password()
+            user.save(update_fields=["password"])
+        else:
+            update_fields = []
+            if not user.first_name and first_name:
+                user.first_name = first_name
+                update_fields.append("first_name")
+            if not user.last_name and last_name:
+                user.last_name = last_name
+                update_fields.append("last_name")
+            if update_fields:
+                user.save(update_fields=update_fields)
+
+        token, _ = Token.objects.get_or_create(user=user)
+        user_data = UserSerializer(user).data
+        requires_profile_completion = not user.is_profile_complete
+
+        return Response(
+            {
+                "success": True,
+                "message": "Login successful."
+                if not requires_profile_completion
+                else "Login successful, profile completion required.",
+                "is_new_user": created,
+                "requires_profile_completion": requires_profile_completion,
+                "token": token.key,
+                "user": user_data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class CompleteProfileView(APIView):
+    """
+    Endpoint to complete faculty profile after first login.
+    """
+
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        serializer = CompleteProfileSerializer(instance=request.user, data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+
+        user_data = UserSerializer(request.user).data
+        return Response(
+            {
+                "success": True,
+                "message": "Profile completed successfully.",
+                "requires_profile_completion": not request.user.is_profile_complete,
+                "user": user_data,
+            },
+            status=status.HTTP_200_OK,
+        )
