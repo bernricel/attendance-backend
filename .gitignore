@@ -3,6 +3,7 @@
 !.env.example
 *.pem
 *.key
+secure_keys/
 attendance_dsa_private.pem
 
 # Python / Django
@@ -13,6 +14,7 @@ __pycache__/
 db.sqlite3
 venv/
 .venv/
+staticfiles/
 
 # Node / React
 node_modules/

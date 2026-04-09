@@ -1,5 +1,10 @@
 Django==6.0.3
 djangorestframework==3.17.1
 django-cors-headers==4.9.0
+dj-database-url==2.3.0
+gunicorn==23.0.0
+psycopg[binary]==3.2.9
+python-dotenv==1.1.1
+whitenoise==6.9.0
 google-auth==2.49.1
 requests==2.33.1
