@@ -8,6 +8,7 @@ class AttendanceScheduleAdmin(admin.ModelAdmin):
     list_display = (
         "id",
         "name",
+        "department",
         "session_type",
         "recurrence_pattern",
         "start_date",
@@ -15,7 +16,7 @@ class AttendanceScheduleAdmin(admin.ModelAdmin):
         "created_by",
     )
     list_filter = ("session_type", "recurrence_pattern")
-    search_fields = ("name", "created_by__email")
+    search_fields = ("name", "department", "created_by__email")
 
 
 @admin.register(AttendanceSession)
@@ -23,6 +24,7 @@ class AttendanceSessionAdmin(admin.ModelAdmin):
     list_display = (
         "id",
         "name",
+        "department",
         "session_type",
         "start_time",
         "end_time",
@@ -31,7 +33,7 @@ class AttendanceSessionAdmin(admin.ModelAdmin):
         "created_by",
     )
     list_filter = ("session_type", "is_active", "parent_schedule")
-    search_fields = ("name", "created_by__email", "qr_token")
+    search_fields = ("name", "department", "created_by__email", "qr_token")
 
 
 @admin.register(AttendanceRecord)
@@ -41,6 +43,7 @@ class AttendanceRecordAdmin(admin.ModelAdmin):
         "user",
         "session",
         "attendance_type",
+        "is_late",
         "status",
         "check_time",
     )

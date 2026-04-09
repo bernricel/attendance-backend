@@ -55,6 +55,8 @@ class User(AbstractUser):
 
     username = None
     email = models.EmailField(unique=True)
+    # Optional local identifier for admin credential login (separate from Google flow).
+    login_username = models.CharField(max_length=150, unique=True, null=True, blank=True)
     first_name = models.CharField(max_length=150, blank=False, default="")
     last_name = models.CharField(max_length=150, blank=False, default="")
     school_id = models.CharField(max_length=50, blank=True)
@@ -84,6 +86,8 @@ class User(AbstractUser):
     def save(self, *args, **kwargs):
         # Keep email normalization + profile-completion check consistent for every save path.
         self.email = self.email.lower()
+        if self.login_username:
+            self.login_username = self.login_username.strip().lower()
         self.is_profile_complete = all(
             [
                 self.first_name.strip(),

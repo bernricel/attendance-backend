@@ -8,6 +8,7 @@ from django.utils import timezone
 SESSION_TYPE_CHOICES = (
     ("check-in", "Check-in"),
     ("check-out", "Check-out"),
+    ("mixed", "Mixed"),
 )
 
 
@@ -19,9 +20,18 @@ class AttendanceSchedule(models.Model):
         CUSTOM = "custom", "Custom"
 
     name = models.CharField(max_length=255)
-    session_type = models.CharField(max_length=20, choices=SESSION_TYPE_CHOICES)
+    # Legacy field retained for backwards compatibility with existing dashboards.
+    session_type = models.CharField(max_length=20, choices=SESSION_TYPE_CHOICES, default="mixed")
+    department = models.CharField(max_length=150, blank=True, default="")
+    # Scheduled session span for the class/workday.
     start_time = models.TimeField()
     end_time = models.TimeField()
+    # Attendance-rule windows applied to each generated occurrence.
+    check_in_start_time = models.TimeField()
+    check_in_end_time = models.TimeField()
+    late_threshold_time = models.TimeField()
+    check_out_start_time = models.TimeField()
+    check_out_end_time = models.TimeField()
     recurrence_pattern = models.CharField(max_length=20, choices=RecurrencePattern.choices)
     # For custom recurrence, weekdays are stored as comma-separated integers (0=Mon ... 4=Fri).
     custom_weekdays = models.CharField(max_length=64, blank=True, default="")
@@ -43,14 +53,29 @@ class AttendanceSchedule(models.Model):
 
 
 class AttendanceSession(models.Model):
+    class LifecycleStatus(models.TextChoices):
+        UPCOMING = "UPCOMING", "Upcoming"
+        ACTIVE = "ACTIVE", "Active"
+        ENDED = "ENDED", "Ended"
+
     class SessionType(models.TextChoices):
-        CHECK_IN = SESSION_TYPE_CHOICES[0]
-        CHECK_OUT = SESSION_TYPE_CHOICES[1]
+        CHECK_IN = "check-in", "Check-in"
+        CHECK_OUT = "check-out", "Check-out"
+        MIXED = "mixed", "Mixed"
 
     name = models.CharField(max_length=255)
-    session_type = models.CharField(max_length=20, choices=SessionType.choices)
+    # Mixed sessions expose both check-in and check-out windows in one occurrence.
+    session_type = models.CharField(max_length=20, choices=SessionType.choices, default=SessionType.MIXED)
+    department = models.CharField(max_length=150, blank=True, default="")
+    # Scheduled session span.
     start_time = models.DateTimeField()
     end_time = models.DateTimeField()
+    # Rule-based attendance windows.
+    check_in_start_time = models.DateTimeField()
+    check_in_end_time = models.DateTimeField()
+    late_threshold_time = models.DateTimeField()
+    check_out_start_time = models.DateTimeField()
+    check_out_end_time = models.DateTimeField()
     is_active = models.BooleanField(default=True)
     qr_token = models.CharField(max_length=64, unique=True, default=uuid.uuid4, editable=False)
     # Security hardening: QR code token rotates periodically to reduce replay risk.
@@ -72,6 +97,40 @@ class AttendanceSession(models.Model):
 
     class Meta:
         ordering = ("-start_time",)
+
+    def get_lifecycle_status(self, reference_time=None):
+        """
+        Compute lifecycle status from server time.
+
+        We intentionally derive this dynamically so recurring occurrences do not
+        need scheduled background jobs just to move between UPCOMING/ACTIVE/ENDED.
+        """
+        now = reference_time or timezone.now()
+        if now < self.start_time:
+            return self.LifecycleStatus.UPCOMING
+        if now > self.end_time:
+            return self.LifecycleStatus.ENDED
+        return self.LifecycleStatus.ACTIVE
+
+    def is_accepting_attendance(self, reference_time=None):
+        """Attendance is accepted only while ACTIVE and manually active."""
+        return self.is_active and self.get_lifecycle_status(reference_time) == self.LifecycleStatus.ACTIVE
+
+    def sync_active_flag_with_lifecycle(self, reference_time=None, save=True):
+        """
+        Automatically deactivate sessions after their end_time.
+
+        This guarantees ended sessions are archived from an operational standpoint
+        even if no explicit admin action is taken.
+        """
+        status = self.get_lifecycle_status(reference_time)
+        changed = False
+        if status == self.LifecycleStatus.ENDED and self.is_active:
+            self.is_active = False
+            changed = True
+            if save:
+                self.save(update_fields=["is_active"])
+        return status, changed
 
     def get_qr_expiry_time(self):
         """Return the server timestamp when the current QR token expires."""
@@ -122,6 +181,7 @@ class AttendanceRecord(models.Model):
     check_time = models.DateTimeField(auto_now_add=True)
     attendance_type = models.CharField(max_length=20, choices=AttendanceType.choices)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.RECORDED)
+    is_late = models.BooleanField(default=False)
     signed_payload = models.TextField(blank=True, default="")
     signature = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
@@ -130,8 +190,8 @@ class AttendanceRecord(models.Model):
         ordering = ("-check_time",)
         constraints = [
             models.UniqueConstraint(
-                fields=("user", "session"),
-                name="unique_attendance_per_user_session",
+                fields=("user", "session", "attendance_type"),
+                name="unique_attendance_per_user_session_type",
             )
         ]
 

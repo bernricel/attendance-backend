@@ -15,7 +15,12 @@ from .serializers import (
     VerifySignatureSerializer,
     get_session_queryset_with_counts,
 )
-from .services import generate_sessions_from_schedule, get_session_qr_status, is_record_signature_valid
+from .services import (
+    ensure_session_lifecycle_state,
+    generate_sessions_from_schedule,
+    get_session_qr_status,
+    is_record_signature_valid,
+)
 
 
 class CreateSessionView(APIView):
@@ -43,9 +48,15 @@ class CreateSessionView(APIView):
             # Store the recurring template so generated sessions remain traceable.
             schedule = AttendanceSchedule.objects.create(
                 name=data["name"],
-                session_type=data["session_type"],
-                start_time=data["recurrence_start_time"],
-                end_time=data["recurrence_end_time"],
+                department=data["department"],
+                session_type=AttendanceSession.SessionType.MIXED,
+                start_time=data["scheduled_start_time"],
+                end_time=data["scheduled_end_time"],
+                check_in_start_time=data["check_in_start_time"],
+                check_in_end_time=data["check_in_end_time"],
+                late_threshold_time=data["late_threshold_time"],
+                check_out_start_time=data["check_out_start_time"],
+                check_out_end_time=data["check_out_end_time"],
                 recurrence_pattern=data["recurrence_pattern"],
                 custom_weekdays=",".join(str(day) for day in sorted(set(data.get("recurrence_days", [])))),
                 start_date=data["recurrence_start_date"],
@@ -66,11 +77,19 @@ class CreateSessionView(APIView):
                 status=status.HTTP_201_CREATED,
             )
 
+        # Single mode now uses the same rule-based window fields, anchored to one session_date.
+        datetime_windows = serializer.build_single_session_datetimes()
         session = AttendanceSession.objects.create(
             name=data["name"],
-            session_type=data["session_type"],
-            start_time=data["start_time"],
-            end_time=data["end_time"],
+            department=data["department"],
+            session_type=AttendanceSession.SessionType.MIXED,
+            start_time=datetime_windows["start_time"],
+            end_time=datetime_windows["end_time"],
+            check_in_start_time=datetime_windows["check_in_start_time"],
+            check_in_end_time=datetime_windows["check_in_end_time"],
+            late_threshold_time=datetime_windows["late_threshold_time"],
+            check_out_start_time=datetime_windows["check_out_start_time"],
+            check_out_end_time=datetime_windows["check_out_end_time"],
             is_active=data["is_active"],
             qr_refresh_interval_seconds=data["qr_refresh_interval_seconds"],
             created_by=request.user,
@@ -95,7 +114,10 @@ class AdminSessionListView(APIView):
     permission_classes = [permissions.IsAuthenticated, IsAdminRole]
 
     def get(self, request):
-        sessions = get_session_queryset_with_counts()
+        sessions = list(get_session_queryset_with_counts())
+        # Keep persisted is_active aligned with lifecycle whenever admin lists sessions.
+        for session in sessions:
+            ensure_session_lifecycle_state(session)
         data = AttendanceSessionSerializer(sessions, many=True).data
         return Response({"success": True, "sessions": data}, status=status.HTTP_200_OK)
 

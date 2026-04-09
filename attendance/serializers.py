@@ -1,5 +1,6 @@
-from datetime import date
+from datetime import date, datetime
 
+from django.conf import settings
 from django.db.models import Count
 from django.utils import timezone
 from rest_framework import serializers
@@ -11,16 +12,26 @@ class AttendanceSessionSerializer(serializers.ModelSerializer):
     created_by_email = serializers.EmailField(source="created_by.email", read_only=True)
     attendance_count = serializers.SerializerMethodField()
     qr_token_expires_at = serializers.SerializerMethodField()
+    lifecycle_status = serializers.SerializerMethodField()
+    can_accept_attendance = serializers.SerializerMethodField()
 
     class Meta:
         model = AttendanceSession
         fields = (
             "id",
             "name",
+            "department",
             "session_type",
             "start_time",
             "end_time",
+            "check_in_start_time",
+            "check_in_end_time",
+            "late_threshold_time",
+            "check_out_start_time",
+            "check_out_end_time",
             "is_active",
+            "lifecycle_status",
+            "can_accept_attendance",
             "qr_token",
             "qr_refresh_interval_seconds",
             "qr_token_last_rotated_at",
@@ -40,6 +51,12 @@ class AttendanceSessionSerializer(serializers.ModelSerializer):
     def get_qr_token_expires_at(self, obj):
         return obj.get_qr_expiry_time()
 
+    def get_lifecycle_status(self, obj):
+        return obj.get_lifecycle_status()
+
+    def get_can_accept_attendance(self, obj):
+        return obj.is_accepting_attendance()
+
 
 class CreateSessionSerializer(serializers.Serializer):
     """
@@ -49,18 +66,29 @@ class CreateSessionSerializer(serializers.Serializer):
     - is_recurring=True: expects recurrence fields and time-of-day fields.
     """
 
-    name = serializers.CharField(max_length=255)
-    session_type = serializers.ChoiceField(choices=AttendanceSession.SessionType.choices)
+    # `title` is the preferred field for the new rule-based session structure.
+    title = serializers.CharField(max_length=255, required=False, allow_blank=False)
+    # Backward-compatible alias so existing clients are not immediately broken.
+    name = serializers.CharField(max_length=255, required=False, allow_blank=False)
+    department = serializers.CharField(max_length=150, required=False, allow_blank=True, default="")
     is_active = serializers.BooleanField(required=False, default=True)
     qr_refresh_interval_seconds = serializers.IntegerField(required=False, min_value=1, default=30)
 
     is_recurring = serializers.BooleanField(required=False, default=False)
 
     # Single-session mode fields.
-    start_time = serializers.DateTimeField(required=False)
-    end_time = serializers.DateTimeField(required=False)
+    session_date = serializers.DateField(required=False)
 
-    # Recurring mode fields.
+    # Shared rule windows (required for both single and recurring modes).
+    scheduled_start_time = serializers.TimeField(required=False)
+    scheduled_end_time = serializers.TimeField(required=False)
+    check_in_start_time = serializers.TimeField(required=False)
+    check_in_end_time = serializers.TimeField(required=False)
+    late_threshold_time = serializers.TimeField(required=False)
+    check_out_start_time = serializers.TimeField(required=False)
+    check_out_end_time = serializers.TimeField(required=False)
+
+    # Recurring mode date rule fields.
     recurrence_pattern = serializers.ChoiceField(
         choices=AttendanceSchedule.RecurrencePattern.choices,
         required=False,
@@ -72,17 +100,42 @@ class CreateSessionSerializer(serializers.Serializer):
     )
     recurrence_start_date = serializers.DateField(required=False)
     recurrence_end_date = serializers.DateField(required=False)
-    recurrence_start_time = serializers.TimeField(required=False)
-    recurrence_end_time = serializers.TimeField(required=False)
-
     def validate(self, attrs):
+        title = attrs.get("title") or attrs.get("name")
+        if not title:
+            raise serializers.ValidationError("title is required.")
+        attrs["name"] = title
+        # CIT-only scope: department is system-defined, not selected in current UI.
+        attrs["department"] = (getattr(settings, "DEFAULT_ATTENDANCE_DEPARTMENT", "CIT") or "CIT").strip()
+
         is_recurring = attrs.get("is_recurring", False)
+        required_rule_fields = (
+            "scheduled_start_time",
+            "scheduled_end_time",
+            "check_in_start_time",
+            "check_in_end_time",
+            "late_threshold_time",
+            "check_out_start_time",
+            "check_out_end_time",
+        )
+        missing_rule_fields = [field for field in required_rule_fields if not attrs.get(field)]
+        if missing_rule_fields:
+            raise serializers.ValidationError(
+                f"Missing required attendance rule fields: {', '.join(missing_rule_fields)}."
+            )
+
+        if attrs["scheduled_start_time"] >= attrs["scheduled_end_time"]:
+            raise serializers.ValidationError("scheduled_end_time must be later than scheduled_start_time.")
+        if attrs["check_in_start_time"] >= attrs["check_in_end_time"]:
+            raise serializers.ValidationError("check_in_end_time must be later than check_in_start_time.")
+        if attrs["check_out_start_time"] >= attrs["check_out_end_time"]:
+            raise serializers.ValidationError("check_out_end_time must be later than check_out_start_time.")
+        if not (attrs["check_in_start_time"] <= attrs["late_threshold_time"] <= attrs["check_in_end_time"]):
+            raise serializers.ValidationError("late_threshold_time must be within the check-in window.")
 
         if not is_recurring:
-            if not attrs.get("start_time") or not attrs.get("end_time"):
-                raise serializers.ValidationError("start_time and end_time are required for single session mode.")
-            if attrs["start_time"] >= attrs["end_time"]:
-                raise serializers.ValidationError("end_time must be later than start_time.")
+            if not attrs.get("session_date"):
+                raise serializers.ValidationError("session_date is required for single session mode.")
             return attrs
 
         # Recurring mode validation.
@@ -90,8 +143,6 @@ class CreateSessionSerializer(serializers.Serializer):
             "recurrence_pattern",
             "recurrence_start_date",
             "recurrence_end_date",
-            "recurrence_start_time",
-            "recurrence_end_time",
         )
         missing = [field for field in required_fields if not attrs.get(field)]
         if missing:
@@ -100,9 +151,6 @@ class CreateSessionSerializer(serializers.Serializer):
         if attrs["recurrence_start_date"] > attrs["recurrence_end_date"]:
             raise serializers.ValidationError("recurrence_end_date must be on or after recurrence_start_date.")
 
-        if attrs["recurrence_start_time"] >= attrs["recurrence_end_time"]:
-            raise serializers.ValidationError("recurrence_end_time must be later than recurrence_start_time.")
-
         if (
             attrs["recurrence_pattern"] == AttendanceSchedule.RecurrencePattern.CUSTOM
             and not attrs.get("recurrence_days")
@@ -110,6 +158,40 @@ class CreateSessionSerializer(serializers.Serializer):
             raise serializers.ValidationError("recurrence_days must include at least one weekday for custom pattern.")
 
         return attrs
+
+    def build_single_session_datetimes(self):
+        """
+        Build timezone-aware datetime windows for a single date occurrence.
+
+        This keeps all derived datetime assembly in one place so view logic remains clear.
+        """
+        data = self.validated_data
+        target_date = data["session_date"]
+        tz_info = timezone.get_current_timezone()
+        return {
+            "start_time": timezone.make_aware(datetime.combine(target_date, data["scheduled_start_time"]), tz_info),
+            "end_time": timezone.make_aware(datetime.combine(target_date, data["scheduled_end_time"]), tz_info),
+            "check_in_start_time": timezone.make_aware(
+                datetime.combine(target_date, data["check_in_start_time"]),
+                tz_info,
+            ),
+            "check_in_end_time": timezone.make_aware(
+                datetime.combine(target_date, data["check_in_end_time"]),
+                tz_info,
+            ),
+            "late_threshold_time": timezone.make_aware(
+                datetime.combine(target_date, data["late_threshold_time"]),
+                tz_info,
+            ),
+            "check_out_start_time": timezone.make_aware(
+                datetime.combine(target_date, data["check_out_start_time"]),
+                tz_info,
+            ),
+            "check_out_end_time": timezone.make_aware(
+                datetime.combine(target_date, data["check_out_end_time"]),
+                tz_info,
+            ),
+        }
 
 
 class AttendanceScheduleSerializer(serializers.ModelSerializer):
@@ -122,9 +204,15 @@ class AttendanceScheduleSerializer(serializers.ModelSerializer):
         fields = (
             "id",
             "name",
+            "department",
             "session_type",
             "start_time",
             "end_time",
+            "check_in_start_time",
+            "check_in_end_time",
+            "late_threshold_time",
+            "check_out_start_time",
+            "check_out_end_time",
             "recurrence_pattern",
             "custom_weekdays",
             "start_date",
@@ -156,9 +244,15 @@ class CreateScheduleSerializer(serializers.ModelSerializer):
         model = AttendanceSchedule
         fields = (
             "name",
+            "department",
             "session_type",
             "start_time",
             "end_time",
+            "check_in_start_time",
+            "check_in_end_time",
+            "late_threshold_time",
+            "check_out_start_time",
+            "check_out_end_time",
             "recurrence_pattern",
             "custom_weekdays",
             "start_date",
@@ -169,6 +263,12 @@ class CreateScheduleSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         if attrs["start_time"] >= attrs["end_time"]:
             raise serializers.ValidationError("end_time must be later than start_time.")
+        if attrs["check_in_start_time"] >= attrs["check_in_end_time"]:
+            raise serializers.ValidationError("check_in_end_time must be later than check_in_start_time.")
+        if attrs["check_out_start_time"] >= attrs["check_out_end_time"]:
+            raise serializers.ValidationError("check_out_end_time must be later than check_out_start_time.")
+        if not (attrs["check_in_start_time"] <= attrs["late_threshold_time"] <= attrs["check_in_end_time"]):
+            raise serializers.ValidationError("late_threshold_time must be within the check-in window.")
         if attrs["start_date"] > attrs["end_date"]:
             raise serializers.ValidationError("end_date must be on or after start_date.")
 
@@ -208,6 +308,7 @@ class AttendanceRecordSerializer(serializers.ModelSerializer):
             "check_time",
             "attendance_type",
             "status",
+            "is_late",
             "signed_payload",
             "signature",
         )
@@ -228,19 +329,35 @@ class VerifySignatureSerializer(serializers.Serializer):
 
 class FacultySessionPreviewSerializer(serializers.ModelSerializer):
     qr_refresh_interval_seconds = serializers.IntegerField(read_only=True)
+    lifecycle_status = serializers.SerializerMethodField()
+    can_accept_attendance = serializers.SerializerMethodField()
 
     class Meta:
         model = AttendanceSession
         fields = (
             "id",
             "name",
+            "department",
             "session_type",
             "start_time",
             "end_time",
+            "check_in_start_time",
+            "check_in_end_time",
+            "late_threshold_time",
+            "check_out_start_time",
+            "check_out_end_time",
             "is_active",
+            "lifecycle_status",
+            "can_accept_attendance",
             "qr_token",
             "qr_refresh_interval_seconds",
         )
+
+    def get_lifecycle_status(self, obj):
+        return obj.get_lifecycle_status()
+
+    def get_can_accept_attendance(self, obj):
+        return obj.is_accepting_attendance()
 
 
 class AttendanceByDateQuerySerializer(serializers.Serializer):

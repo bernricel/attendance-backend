@@ -1,4 +1,5 @@
 from django.conf import settings
+from django.db.models import Q
 from rest_framework import permissions, status
 from rest_framework.authentication import TokenAuthentication
 from rest_framework.authtoken.models import Token
@@ -7,7 +8,7 @@ from rest_framework.views import APIView
 
 from .google_auth import GoogleAuthError, verify_google_id_token
 from .models import User
-from .serializers import CompleteProfileSerializer, GoogleLoginSerializer, UserSerializer
+from .serializers import AdminLoginSerializer, CompleteProfileSerializer, GoogleLoginSerializer, UserSerializer
 
 
 def split_google_name(full_name):
@@ -88,6 +89,14 @@ class GoogleLoginView(APIView):
             user.set_unusable_password()
             user.save(update_fields=["password"])
         else:
+            if user.role == User.Role.ADMIN:
+                return Response(
+                    {
+                        "success": False,
+                        "message": "Admin accounts must use the dedicated admin login page.",
+                    },
+                    status=status.HTTP_403_FORBIDDEN,
+                )
             # Backfill missing names for existing users without overwriting existing values.
             update_fields = []
             if not user.first_name and first_name:
@@ -140,6 +149,66 @@ class CompleteProfileView(APIView):
                 "message": "Profile completed successfully.",
                 "requires_profile_completion": not request.user.is_profile_complete,
                 "user": user_data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class AdminLoginView(APIView):
+    """
+    Credential login endpoint for admin users only.
+
+    Security behavior:
+    - accepts email or login_username as identifier
+    - validates password hash using Django auth internals
+    - returns generic error for invalid credentials to avoid user enumeration
+    """
+
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        serializer = AdminLoginSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        identifier = serializer.validated_data["identifier"].strip().lower()
+        password = serializer.validated_data["password"]
+
+        user = (
+            User.objects.filter(Q(email__iexact=identifier) | Q(login_username__iexact=identifier))
+            .only(
+                "id",
+                "email",
+                "login_username",
+                "first_name",
+                "last_name",
+                "school_id",
+                "role",
+                "is_profile_complete",
+                "password",
+                "is_active",
+            )
+            .first()
+        )
+
+        if not user or user.role != User.Role.ADMIN or not user.check_password(password):
+            return Response(
+                {"success": False, "message": "Invalid admin credentials."},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        if not user.is_active:
+            return Response(
+                {"success": False, "message": "This admin account is disabled."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        token, _ = Token.objects.get_or_create(user=user)
+        return Response(
+            {
+                "success": True,
+                "message": "Admin login successful.",
+                "token": token.key,
+                "user": UserSerializer(user).data,
             },
             status=status.HTTP_200_OK,
         )

@@ -150,6 +150,7 @@ CORS_ALLOWED_ORIGINS = [
 
 GOOGLE_OAUTH_CLIENT_ID = os.environ.get('GOOGLE_OAUTH_CLIENT_ID', '')
 ALLOWED_GOOGLE_DOMAIN = '@ua.edu.ph'
+DEFAULT_ATTENDANCE_DEPARTMENT = 'CIT'
 
 # DSA key file locations for attendance signature signing/verification.
 DSA_PRIVATE_KEY_PATH = os.environ.get(

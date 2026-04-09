@@ -12,6 +12,7 @@ from .serializers import (
 )
 from .services import (
     create_signed_attendance_record,
+    ensure_session_lifecycle_state,
     get_session_by_qr_token,
     rotate_session_qr_if_expired,
     validate_session_for_scan,
@@ -38,6 +39,18 @@ class FacultySessionPreviewView(APIView):
             return Response(
                 {"success": False, "message": "Invalid QR token. Session not found."},
                 status=status.HTTP_404_NOT_FOUND,
+            )
+
+        lifecycle_status = ensure_session_lifecycle_state(session)
+        if lifecycle_status == session.LifecycleStatus.ENDED:
+            return Response(
+                {"success": False, "message": "This attendance session has already ended."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if lifecycle_status == session.LifecycleStatus.UPCOMING:
+            return Response(
+                {"success": False, "message": "This attendance session has not started yet."},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         # Expired QR codes are intentionally rejected so only the latest token is valid.
@@ -101,8 +114,8 @@ class ScanAttendanceView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        # If attendance_type is not sent, use the session's configured type.
-        attendance_type = data.get("attendance_type") or session.session_type
+        # If attendance_type is omitted, the service resolves it from rule windows.
+        attendance_type = data.get("attendance_type")
 
         # Centralized rule checks: active window, token validity, duplicates, etc.
         validation = validate_session_for_scan(
@@ -121,13 +134,18 @@ class ScanAttendanceView(APIView):
         record = create_signed_attendance_record(
             user=request.user,
             session=session,
-            attendance_type=attendance_type,
+            attendance_type=validation.resolved_attendance_type,
+            is_late=validation.is_late,
         )
 
         return Response(
             {
                 "success": True,
-                "message": "Attendance recorded successfully.",
+                "message": (
+                    "Attendance recorded successfully."
+                    if not validation.is_late
+                    else "Attendance recorded successfully (marked late)."
+                ),
                 "record": AttendanceRecordSerializer(record).data,
             },
             status=status.HTTP_201_CREATED,

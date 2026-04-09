@@ -34,6 +34,74 @@ class GoogleLoginTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
         self.assertFalse(User.objects.filter(email="outside@gmail.com").exists())
 
+    def test_google_login_rejects_existing_admin_account(self):
+        User.objects.create_user(
+            email="admin@ua.edu.ph",
+            password="SecureAdminPass123!",
+            role=User.Role.ADMIN,
+        )
+        payload = {
+            "google_user": {
+                "email": "admin@ua.edu.ph",
+                "name": "Admin User",
+            }
+        }
+
+        response = self.client.post("/api/auth/google-login/", payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertIn("dedicated admin login", response.data["message"].lower())
+
+
+class AdminLoginTests(APITestCase):
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            email="admin.login@ua.edu.ph",
+            password="SecureAdminPass123!",
+            role=User.Role.ADMIN,
+            login_username="cit_admin",
+            is_staff=True,
+            first_name="System",
+            last_name="Admin",
+        )
+        self.faculty = User.objects.create_user(
+            email="faculty.user@ua.edu.ph",
+            password="FacultyPass123!",
+            role=User.Role.FACULTY,
+        )
+
+    def test_admin_can_login_with_email(self):
+        response = self.client.post(
+            "/api/auth/admin-login/",
+            {"identifier": self.admin.email, "password": "SecureAdminPass123!"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["success"])
+        self.assertEqual(response.data["user"]["role"], "admin")
+        self.assertIn("token", response.data)
+
+    def test_admin_can_login_with_username(self):
+        response = self.client.post(
+            "/api/auth/admin-login/",
+            {"identifier": "cit_admin", "password": "SecureAdminPass123!"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["user"]["email"], self.admin.email)
+
+    def test_admin_login_rejects_non_admin_account(self):
+        response = self.client.post(
+            "/api/auth/admin-login/",
+            {"identifier": self.faculty.email, "password": "FacultyPass123!"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertIn("invalid admin credentials", response.data["message"].lower())
+
 
 class ProfileCompletionTests(APITestCase):
     def test_complete_profile_marks_profile_complete(self):

@@ -9,6 +9,7 @@ class UserSerializer(serializers.ModelSerializer):
         fields = (
             "id",
             "email",
+            "login_username",
             "first_name",
             "last_name",
             "school_id",
@@ -41,3 +42,9 @@ class CompleteProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = ("first_name", "last_name", "school_id")
+
+
+class AdminLoginSerializer(serializers.Serializer):
+    # Supports either admin email or configured login_username.
+    identifier = serializers.CharField(required=True, allow_blank=False, max_length=254)
+    password = serializers.CharField(required=True, allow_blank=False, trim_whitespace=False)

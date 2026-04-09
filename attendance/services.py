@@ -20,6 +20,20 @@ class ScanValidationResult:
     is_valid: bool
     message: str = ""
     http_status: int = 200
+    resolved_attendance_type: str = ""
+    is_late: bool = False
+    lifecycle_status: str = ""
+
+
+def ensure_session_lifecycle_state(session: AttendanceSession, *, reference_time=None):
+    """
+    Synchronize `is_active` with time-based lifecycle and return current status.
+
+    Side effect:
+    - Automatically sets is_active=False once the session is ENDED.
+    """
+    status, _changed = session.sync_active_flag_with_lifecycle(reference_time=reference_time, save=True)
+    return status
 
 
 def _resolve_schedule_weekdays(schedule: AttendanceSchedule) -> set[int]:
@@ -48,9 +62,8 @@ def generate_sessions_from_schedule(schedule: AttendanceSchedule):
     Generate attendance sessions for every matching date in the schedule range.
 
     Duplicate prevention:
-    A session is skipped if a record already exists with the same session_type,
-    start_time, and end_time. This prevents duplicate generation from repeated
-    schedule submissions.
+    A session is skipped if the dated occurrence already exists with the same
+    schedule windows. This prevents duplicate generation from repeated submissions.
     """
     timezone_info = timezone.get_current_timezone()
     allowed_weekdays = _resolve_schedule_weekdays(schedule)
@@ -69,10 +82,35 @@ def generate_sessions_from_schedule(schedule: AttendanceSchedule):
                 datetime.combine(current_date, schedule.end_time),
                 timezone=timezone_info,
             )
+            check_in_start_dt = timezone.make_aware(
+                datetime.combine(current_date, schedule.check_in_start_time),
+                timezone=timezone_info,
+            )
+            check_in_end_dt = timezone.make_aware(
+                datetime.combine(current_date, schedule.check_in_end_time),
+                timezone=timezone_info,
+            )
+            late_threshold_dt = timezone.make_aware(
+                datetime.combine(current_date, schedule.late_threshold_time),
+                timezone=timezone_info,
+            )
+            check_out_start_dt = timezone.make_aware(
+                datetime.combine(current_date, schedule.check_out_start_time),
+                timezone=timezone_info,
+            )
+            check_out_end_dt = timezone.make_aware(
+                datetime.combine(current_date, schedule.check_out_end_time),
+                timezone=timezone_info,
+            )
             already_exists = AttendanceSession.objects.filter(
-                session_type=schedule.session_type,
+                name=f"{schedule.name} ({current_date.isoformat()})",
                 start_time=start_dt,
                 end_time=end_dt,
+                check_in_start_time=check_in_start_dt,
+                check_in_end_time=check_in_end_dt,
+                late_threshold_time=late_threshold_dt,
+                check_out_start_time=check_out_start_dt,
+                check_out_end_time=check_out_end_dt,
             ).exists()
 
             if already_exists:
@@ -80,9 +118,15 @@ def generate_sessions_from_schedule(schedule: AttendanceSchedule):
             else:
                 session = AttendanceSession.objects.create(
                     name=f"{schedule.name} ({current_date.isoformat()})",
-                    session_type=schedule.session_type,
+                    department=schedule.department,
+                    session_type=AttendanceSession.SessionType.MIXED,
                     start_time=start_dt,
                     end_time=end_dt,
+                    check_in_start_time=check_in_start_dt,
+                    check_in_end_time=check_in_end_dt,
+                    late_threshold_time=late_threshold_dt,
+                    check_out_start_time=check_out_start_dt,
+                    check_out_end_time=check_out_end_dt,
                     is_active=True,
                     qr_refresh_interval_seconds=schedule.qr_refresh_interval_seconds,
                     parent_schedule=schedule,
@@ -122,12 +166,16 @@ def get_session_qr_status(session, *, rotate_if_expired=False, reference_time=No
     expired tokens before returning the final current token.
     """
     now = reference_time or timezone.now()
-    if rotate_if_expired:
+    lifecycle_status = ensure_session_lifecycle_state(session, reference_time=now)
+    can_accept_attendance = session.is_accepting_attendance(reference_time=now)
+    if rotate_if_expired and can_accept_attendance:
         rotate_session_qr_if_expired(session, reference_time=now)
 
     expires_at = session.get_qr_expiry_time()
-    seconds_remaining = max(0, int((expires_at - now).total_seconds()))
+    seconds_remaining = max(0, int((expires_at - now).total_seconds())) if can_accept_attendance else 0
     return {
+        "lifecycle_status": lifecycle_status,
+        "can_accept_attendance": can_accept_attendance,
         "qr_token": session.qr_token,
         "qr_token_last_rotated_at": session.qr_token_last_rotated_at,
         "qr_token_expires_at": expires_at,
@@ -157,8 +205,8 @@ def validate_session_for_scan(*, user, session, attendance_type: str, scanned_qr
     1) session exists
     2) session is active
     3) current server time is within allowed window
-    4) no duplicate record for same user/session
-    5) requested attendance type matches configured session type
+    4) no duplicate record for same user/session/type
+    5) mark check-in as late when check-in time is after threshold
     """
     # Step 1: QR token must point to an existing session.
     if not session:
@@ -168,22 +216,72 @@ def validate_session_for_scan(*, user, session, attendance_type: str, scanned_qr
             http_status=404,
         )
 
-    # Step 2: Inactive sessions are blocked to prevent unintended late scans.
+    # Step 2: Sync lifecycle and block ended/upcoming sessions with explicit messages.
+    now = timezone.now()
+    lifecycle_status = ensure_session_lifecycle_state(session, reference_time=now)
+    if lifecycle_status == AttendanceSession.LifecycleStatus.ENDED:
+        return ScanValidationResult(
+            is_valid=False,
+            message="This attendance session has already ended.",
+            http_status=400,
+            lifecycle_status=lifecycle_status,
+        )
+    if lifecycle_status == AttendanceSession.LifecycleStatus.UPCOMING:
+        return ScanValidationResult(
+            is_valid=False,
+            message="This attendance session has not started yet.",
+            http_status=400,
+            lifecycle_status=lifecycle_status,
+        )
     if not session.is_active:
         return ScanValidationResult(
             is_valid=False,
-            message="This attendance session is not active.",
+            message="This session is no longer active.",
             http_status=400,
+            lifecycle_status=lifecycle_status,
         )
 
     # Step 3: Use server-side time (not client device time) to enforce fairness.
-    now = timezone.now()
-    if now < session.start_time or now > session.end_time:
-        return ScanValidationResult(
-            is_valid=False,
-            message="Current time is outside the allowed attendance window.",
-            http_status=400,
-        )
+    requested_type = attendance_type or ""
+    if requested_type not in {
+        AttendanceRecord.AttendanceType.CHECK_IN,
+        AttendanceRecord.AttendanceType.CHECK_OUT,
+    }:
+        # If client does not send a type, infer it from active rule window.
+        in_check_in_window = session.check_in_start_time <= now <= session.check_in_end_time
+        in_check_out_window = session.check_out_start_time <= now <= session.check_out_end_time
+
+        if in_check_in_window and not in_check_out_window:
+            requested_type = AttendanceRecord.AttendanceType.CHECK_IN
+        elif in_check_out_window and not in_check_in_window:
+            requested_type = AttendanceRecord.AttendanceType.CHECK_OUT
+        elif in_check_in_window and in_check_out_window:
+            # Deterministic tie-breaker for overlapping windows.
+            requested_type = AttendanceRecord.AttendanceType.CHECK_IN
+        else:
+            return ScanValidationResult(
+                is_valid=False,
+                message="Current time is outside the allowed check-in/check-out windows.",
+                http_status=400,
+                lifecycle_status=lifecycle_status,
+            )
+
+    if requested_type == AttendanceRecord.AttendanceType.CHECK_IN:
+        if now < session.check_in_start_time or now > session.check_in_end_time:
+            return ScanValidationResult(
+                is_valid=False,
+                message="Current time is outside the allowed check-in window.",
+                http_status=400,
+                lifecycle_status=lifecycle_status,
+            )
+    elif requested_type == AttendanceRecord.AttendanceType.CHECK_OUT:
+        if now < session.check_out_start_time or now > session.check_out_end_time:
+            return ScanValidationResult(
+                is_valid=False,
+                message="Current time is outside the allowed check-out window.",
+                http_status=400,
+                lifecycle_status=lifecycle_status,
+            )
 
     # Step 3.5: QR token must be current for this session.
     # If expired, rotate immediately so only the new token remains valid.
@@ -193,28 +291,32 @@ def validate_session_for_scan(*, user, session, attendance_type: str, scanned_qr
             is_valid=False,
             message="QR token has expired. Please scan the latest QR code.",
             http_status=400,
+            lifecycle_status=lifecycle_status,
         )
 
-    # Step 4: Prevent duplicate attendance entries for the same user/session pair.
-    if AttendanceRecord.objects.filter(user=user, session=session).exists():
+    # Step 4: Prevent duplicate attendance entries per user/session/attendance type.
+    if AttendanceRecord.objects.filter(
+        user=user,
+        session=session,
+        attendance_type=requested_type,
+    ).exists():
         return ScanValidationResult(
             is_valid=False,
-            message="Attendance already recorded for this session.",
+            message=f"{requested_type} attendance already recorded for this session.",
             http_status=409,
+            lifecycle_status=lifecycle_status,
         )
 
-    # Step 5: Optional explicit type must match the session configuration.
-    if attendance_type != session.session_type:
-        return ScanValidationResult(
-            is_valid=False,
-            message="attendance_type must match the attendance session type.",
-            http_status=400,
-        )
-
-    return ScanValidationResult(is_valid=True)
+    is_late = requested_type == AttendanceRecord.AttendanceType.CHECK_IN and now > session.late_threshold_time
+    return ScanValidationResult(
+        is_valid=True,
+        resolved_attendance_type=requested_type,
+        is_late=is_late,
+        lifecycle_status=lifecycle_status,
+    )
 
 
-def create_signed_attendance_record(*, user, session, attendance_type: str):
+def create_signed_attendance_record(*, user, session, attendance_type: str, is_late: bool):
     """
     Create and sign an attendance record in one atomic transaction.
 
@@ -229,6 +331,7 @@ def create_signed_attendance_record(*, user, session, attendance_type: str):
             session=session,
             attendance_type=attendance_type,
             status=AttendanceRecord.Status.RECORDED,
+            is_late=is_late,
         )
 
         # Build canonical payload text first, then sign it using DSA private key.
