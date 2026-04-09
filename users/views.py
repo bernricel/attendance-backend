@@ -33,6 +33,7 @@ class GoogleLoginView(APIView):
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
+        # Accept either a Google ID token (preferred) or fallback google_user payload.
         serializer = GoogleLoginSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
@@ -42,6 +43,7 @@ class GoogleLoginView(APIView):
 
         if validated.get("id_token"):
             try:
+                # Backend verifies the token directly with Google libraries.
                 payload = verify_google_id_token(validated["id_token"])
             except GoogleAuthError as exc:
                 return Response(
@@ -58,6 +60,7 @@ class GoogleLoginView(APIView):
             google_email = (google_user.get("email") or "").lower()
             google_name = (google_user.get("name") or google_user.get("full_name") or "").strip()
 
+        # Domain restriction required by project policy: only @ua.edu.ph accounts.
         allowed_domain = getattr(settings, "ALLOWED_GOOGLE_DOMAIN", "@ua.edu.ph").lower()
         if not google_email or not google_email.endswith(allowed_domain):
             return Response(
@@ -70,6 +73,7 @@ class GoogleLoginView(APIView):
 
         first_name, last_name = split_google_name(google_name)
 
+        # First-time Google login auto-creates a faculty account.
         user, created = User.objects.get_or_create(
             email=google_email,
             defaults={
@@ -80,9 +84,11 @@ class GoogleLoginView(APIView):
         )
 
         if created:
+            # Google-auth accounts do not use local password login.
             user.set_unusable_password()
             user.save(update_fields=["password"])
         else:
+            # Backfill missing names for existing users without overwriting existing values.
             update_fields = []
             if not user.first_name and first_name:
                 user.first_name = first_name
@@ -95,6 +101,7 @@ class GoogleLoginView(APIView):
 
         token, _ = Token.objects.get_or_create(user=user)
         user_data = UserSerializer(user).data
+        # Frontend uses this flag to force profile completion flow after first login.
         requires_profile_completion = not user.is_profile_complete
 
         return Response(
@@ -121,6 +128,7 @@ class CompleteProfileView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
+        # Required profile fields are validated in serializer/model logic.
         serializer = CompleteProfileSerializer(instance=request.user, data=request.data)
         serializer.is_valid(raise_exception=True)
         serializer.save()

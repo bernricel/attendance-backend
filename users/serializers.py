@@ -12,7 +12,6 @@ class UserSerializer(serializers.ModelSerializer):
             "first_name",
             "last_name",
             "school_id",
-            "department",
             "role",
             "is_profile_complete",
         )
@@ -38,8 +37,7 @@ class CompleteProfileSerializer(serializers.ModelSerializer):
     first_name = serializers.CharField(required=True, allow_blank=False, max_length=150)
     last_name = serializers.CharField(required=True, allow_blank=False, max_length=150)
     school_id = serializers.CharField(required=True, allow_blank=False, max_length=50)
-    department = serializers.CharField(required=True, allow_blank=False, max_length=150)
 
     class Meta:
         model = User
-        fields = ("first_name", "last_name", "school_id", "department")
+        fields = ("first_name", "last_name", "school_id")

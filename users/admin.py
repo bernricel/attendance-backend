@@ -8,12 +8,12 @@ from .models import User
 class UserAdmin(BaseUserAdmin):
     model = User
     ordering = ("email",)
-    list_display = ("email", "first_name", "last_name", "school_id", "department", "role", "is_profile_complete", "is_staff")
-    search_fields = ("email", "first_name", "last_name", "school_id", "department")
+    list_display = ("email", "first_name", "last_name", "school_id", "role", "is_profile_complete", "is_staff")
+    search_fields = ("email", "first_name", "last_name", "school_id")
 
     fieldsets = (
         (None, {"fields": ("email", "password")}),
-        ("Personal info", {"fields": ("first_name", "last_name", "school_id", "department", "role", "is_profile_complete")}),
+        ("Personal info", {"fields": ("first_name", "last_name", "school_id", "role", "is_profile_complete")}),
         ("Permissions", {"fields": ("is_active", "is_staff", "is_superuser", "groups", "user_permissions")}),
         ("Important dates", {"fields": ("last_login", "date_joined")}),
     )

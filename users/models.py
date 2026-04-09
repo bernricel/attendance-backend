@@ -41,6 +41,14 @@ class UserManager(BaseUserManager):
 
 
 class User(AbstractUser):
+    """
+    Custom user model for the attendance system.
+
+    Profile completeness is part of the login flow:
+    a user is marked complete only when first_name, last_name, and school_id
+    are all provided.
+    """
+
     class Role(models.TextChoices):
         ADMIN = "admin", "Admin"
         FACULTY = "faculty", "Faculty"
@@ -50,7 +58,6 @@ class User(AbstractUser):
     first_name = models.CharField(max_length=150, blank=False, default="")
     last_name = models.CharField(max_length=150, blank=False, default="")
     school_id = models.CharField(max_length=50, blank=True)
-    department = models.CharField(max_length=150, blank=True)
     role = models.CharField(max_length=20, choices=Role.choices, default=Role.FACULTY)
     is_profile_complete = models.BooleanField(default=False)
 
@@ -60,25 +67,28 @@ class User(AbstractUser):
     objects = UserManager()
 
     def refresh_profile_completion(self, save=True):
+        """
+        Recalculate profile completion status from required profile fields.
+        Useful when profile fields are updated outside the standard serializer flow.
+        """
         self.is_profile_complete = all(
             [
                 self.first_name.strip(),
                 self.last_name.strip(),
                 self.school_id.strip(),
-                self.department.strip(),
             ]
         )
         if save:
             self.save(update_fields=["is_profile_complete"])
 
     def save(self, *args, **kwargs):
+        # Keep email normalization + profile-completion check consistent for every save path.
         self.email = self.email.lower()
         self.is_profile_complete = all(
             [
                 self.first_name.strip(),
                 self.last_name.strip(),
                 self.school_id.strip(),
-                self.department.strip(),
             ]
         )
         super().save(*args, **kwargs)

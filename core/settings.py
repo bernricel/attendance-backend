@@ -115,7 +115,9 @@ AUTH_PASSWORD_VALIDATORS = [
 
 LANGUAGE_CODE = 'en-us'
 
-TIME_ZONE = 'UTC'
+# Project operates in the Philippines, so date validations (e.g. attendance-by-date)
+# must use Manila local date boundaries rather than UTC day boundaries.
+TIME_ZONE = 'Asia/Manila'
 
 USE_I18N = True
 

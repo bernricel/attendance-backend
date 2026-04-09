@@ -52,7 +52,6 @@ class ProfileCompletionTests(APITestCase):
                 "first_name": "Faculty",
                 "last_name": "Two",
                 "school_id": "FAC-1001",
-                "department": "Computer Science",
             },
             format="json",
         )
