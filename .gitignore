@@ -1,0 +1,29 @@
+# Sensitive files
+.env
+!.env.example
+*.pem
+*.key
+attendance_dsa_private.pem
+
+# Python / Django
+__pycache__/
+*.pyc
+*.pyo
+*.log
+db.sqlite3
+venv/
+.venv/
+
+# Node / React
+node_modules/
+dist/
+build/
+.vite/
+npm-debug.log*
+yarn-debug.log*
+
+# IDE / system
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
