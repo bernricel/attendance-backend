@@ -390,6 +390,14 @@ class AttendanceByDateQuerySerializer(serializers.Serializer):
         return value
 
 
+class AdminFacultyAttendanceQuerySerializer(serializers.Serializer):
+    faculty_id = serializers.IntegerField(required=False, min_value=1)
+
+
+class AdminSessionDeleteSerializer(serializers.Serializer):
+    password = serializers.CharField(required=True, allow_blank=False, trim_whitespace=False)
+
+
 def get_session_queryset_with_counts():
     return AttendanceSession.objects.select_related("created_by").annotate(
         attendance_count=Count("attendance_records")

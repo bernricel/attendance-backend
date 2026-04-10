@@ -11,8 +11,10 @@ from users.models import User
 
 class AttendanceApiTests(APITestCase):
     def setUp(self):
+        self.admin_password = "SecureAdminPass123!"
         self.admin_user = User.objects.create_user(
             email="admin@ua.edu.ph",
+            password=self.admin_password,
             role=User.Role.ADMIN,
             first_name="System",
             last_name="Admin",
@@ -276,3 +278,77 @@ class AttendanceApiTests(APITestCase):
         self.assertTrue(response.data["success"])
         self.assertNotEqual(response.data["qr_token"], old_token)
         self.assertIn("seconds_until_rotation", response.data)
+
+    def test_admin_can_fetch_faculty_attendance_history(self):
+        session = self._create_rule_session(name="Faculty History Session", department="CIT")
+        AttendanceRecord.objects.create(
+            user=self.faculty_user,
+            session=session,
+            attendance_type=AttendanceRecord.AttendanceType.CHECK_IN,
+            is_late=False,
+        )
+        AttendanceRecord.objects.create(
+            user=self.faculty_user,
+            session=session,
+            attendance_type=AttendanceRecord.AttendanceType.CHECK_OUT,
+            is_late=False,
+        )
+
+        self._admin_auth()
+        response = self.client.get(f"/api/admin/faculty-attendance?faculty_id={self.faculty_user.id}")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["success"])
+        self.assertEqual(response.data["faculty"]["id"], self.faculty_user.id)
+        self.assertEqual(response.data["total_records"], 1)
+        self.assertEqual(response.data["records"][0]["session_name"], "Faculty History Session")
+        self.assertIsNotNone(response.data["records"][0]["check_in_time"])
+        self.assertIsNotNone(response.data["records"][0]["check_out_time"])
+
+    def test_delete_session_requires_correct_admin_password(self):
+        session = self._create_rule_session(name="Protected Session")
+        AttendanceRecord.objects.create(
+            user=self.faculty_user,
+            session=session,
+            attendance_type=AttendanceRecord.AttendanceType.CHECK_IN,
+            is_late=False,
+        )
+
+        self._admin_auth()
+        response = self.client.delete(
+            f"/api/admin/sessions/{session.id}",
+            {"password": "WrongPassword123"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertTrue(AttendanceSession.objects.filter(id=session.id).exists())
+        self.assertEqual(AttendanceRecord.objects.filter(session=session).count(), 1)
+
+    def test_delete_session_cascades_attendance_records(self):
+        session = self._create_rule_session(name="Cascade Delete Session")
+        AttendanceRecord.objects.create(
+            user=self.faculty_user,
+            session=session,
+            attendance_type=AttendanceRecord.AttendanceType.CHECK_IN,
+            is_late=False,
+        )
+        AttendanceRecord.objects.create(
+            user=self.faculty_user,
+            session=session,
+            attendance_type=AttendanceRecord.AttendanceType.CHECK_OUT,
+            is_late=False,
+        )
+
+        self._admin_auth()
+        response = self.client.delete(
+            f"/api/admin/sessions/{session.id}",
+            {"password": self.admin_password},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["success"])
+        self.assertEqual(response.data["deleted_attendance_records"], 2)
+        self.assertFalse(AttendanceSession.objects.filter(id=session.id).exists())
+        self.assertEqual(AttendanceRecord.objects.filter(session_id=session.id).count(), 0)

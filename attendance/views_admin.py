@@ -1,4 +1,5 @@
 from django.utils import timezone
+from django.db import transaction
 from rest_framework.exceptions import ValidationError
 from rest_framework import permissions, status
 from rest_framework.authentication import TokenAuthentication
@@ -8,6 +9,8 @@ from rest_framework.views import APIView
 from .models import AttendanceRecord, AttendanceSchedule, AttendanceSession
 from .permissions import IsAdminRole
 from .serializers import (
+    AdminFacultyAttendanceQuerySerializer,
+    AdminSessionDeleteSerializer,
     AttendanceByDateQuerySerializer,
     AttendanceRecordSerializer,
     AttendanceSessionSerializer,
@@ -15,6 +18,7 @@ from .serializers import (
     VerifySignatureSerializer,
     get_session_queryset_with_counts,
 )
+from users.models import User
 from .services import (
     ensure_session_lifecycle_state,
     generate_sessions_from_schedule,
@@ -156,6 +160,95 @@ class AttendanceByDateView(APIView):
         )
 
 
+class FacultyAttendanceRecordsView(APIView):
+    """Admin endpoint to browse faculty attendance history."""
+
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [permissions.IsAuthenticated, IsAdminRole]
+
+    def get(self, request):
+        query_serializer = AdminFacultyAttendanceQuerySerializer(data=request.query_params)
+        query_serializer.is_valid(raise_exception=True)
+        selected_faculty_id = query_serializer.validated_data.get("faculty_id")
+
+        faculties = list(
+            User.objects.filter(role=User.Role.FACULTY)
+            .order_by("first_name", "last_name", "email")
+            .values("id", "first_name", "last_name", "email")
+        )
+        for faculty in faculties:
+            full_name = f"{faculty['first_name']} {faculty['last_name']}".strip()
+            faculty["full_name"] = full_name or faculty["email"]
+
+        if not selected_faculty_id:
+            return Response(
+                {
+                    "success": True,
+                    "faculties": faculties,
+                    "records": [],
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        faculty = (
+            User.objects.filter(id=selected_faculty_id, role=User.Role.FACULTY)
+            .only("id", "first_name", "last_name", "email")
+            .first()
+        )
+        if not faculty:
+            return Response(
+                {"success": False, "message": "Faculty member not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        records = (
+            AttendanceRecord.objects.select_related("session")
+            .filter(user=faculty)
+            .order_by("-check_time")
+        )
+
+        grouped_records = {}
+        for record in records:
+            key = (record.session_id, timezone.localtime(record.check_time).date().isoformat())
+            if key not in grouped_records:
+                grouped_records[key] = {
+                    "session_id": record.session_id,
+                    "session_name": record.session.name,
+                    "department": record.session.department,
+                    "date": timezone.localtime(record.check_time).date().isoformat(),
+                    "check_in_time": None,
+                    "check_out_time": None,
+                    "attendance_status": "Recorded",
+                }
+            if record.attendance_type == AttendanceRecord.AttendanceType.CHECK_IN:
+                grouped_records[key]["check_in_time"] = record.check_time
+                grouped_records[key]["attendance_status"] = "Late" if record.is_late else "On time"
+            elif record.attendance_type == AttendanceRecord.AttendanceType.CHECK_OUT:
+                grouped_records[key]["check_out_time"] = record.check_time
+
+        history_rows = sorted(
+            grouped_records.values(),
+            key=lambda row: (row["date"], row["check_in_time"] or row["check_out_time"] or timezone.now()),
+            reverse=True,
+        )
+
+        faculty_name = f"{faculty.first_name} {faculty.last_name}".strip() or faculty.email
+        return Response(
+            {
+                "success": True,
+                "faculties": faculties,
+                "faculty": {
+                    "id": faculty.id,
+                    "full_name": faculty_name,
+                    "email": faculty.email,
+                },
+                "records": history_rows,
+                "total_records": len(history_rows),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
 class VerifySignatureView(APIView):
     """
     Admin integrity-check endpoint for a stored attendance record.
@@ -197,6 +290,46 @@ class VerifySignatureView(APIView):
                     if is_valid
                     else "Signature is invalid or missing payload/signature."
                 ),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class DeleteSessionView(APIView):
+    """Securely delete a session and all linked attendance records."""
+
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [permissions.IsAuthenticated, IsAdminRole]
+
+    def delete(self, request, session_id):
+        serializer = AdminSessionDeleteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        if not request.user.check_password(serializer.validated_data["password"]):
+            return Response(
+                {"success": False, "message": "Incorrect password. Session deletion was not performed."},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        try:
+            with transaction.atomic():
+                session = AttendanceSession.objects.select_for_update().get(id=session_id)
+                deleted_attendance_count = session.attendance_records.count()
+                session_name = session.name
+                session.delete()
+        except AttendanceSession.DoesNotExist:
+            return Response(
+                {"success": False, "message": "Attendance session not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        return Response(
+            {
+                "success": True,
+                "message": "Session deleted successfully. Related attendance records were also deleted.",
+                "session_id": session_id,
+                "session_name": session_name,
+                "deleted_attendance_records": deleted_attendance_count,
             },
             status=status.HTTP_200_OK,
         )
