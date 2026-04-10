@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from django.db import transaction
 from django.utils import timezone
 
+# DSA helper functions: build payload, sign payload, and verify signature.
 from .dsa_service import build_attendance_payload, sign_payload, verify_payload_signature
 from .models import AttendanceRecord, AttendanceSchedule, AttendanceSession
 
@@ -32,6 +33,7 @@ def ensure_session_lifecycle_state(session: AttendanceSession, *, reference_time
     Side effect:
     - Automatically sets is_active=False once the session is ENDED.
     """
+    # Shared helper used by multiple endpoints to keep lifecycle state consistent.
     status, _changed = session.sync_active_flag_with_lifecycle(reference_time=reference_time, save=True)
     return status
 
@@ -46,6 +48,7 @@ def _resolve_schedule_weekdays(schedule: AttendanceSchedule) -> set[int]:
     - tth: Tuesday, Thursday
     - custom: values from schedule.custom_weekdays (stored as comma-separated ints)
     """
+    # Converts recurrence mode into concrete weekday numbers used during generation.
     if schedule.recurrence_pattern == AttendanceSchedule.RecurrencePattern.WEEKDAYS:
         return {0, 1, 2, 3, 4}
     if schedule.recurrence_pattern == AttendanceSchedule.RecurrencePattern.MWF:
@@ -65,6 +68,7 @@ def generate_sessions_from_schedule(schedule: AttendanceSchedule):
     A session is skipped if the dated occurrence already exists with the same
     schedule windows. This prevents duplicate generation from repeated submissions.
     """
+    # Backend generates all recurring sessions ahead of time (each with its own QR token).
     timezone_info = timezone.get_current_timezone()
     allowed_weekdays = _resolve_schedule_weekdays(schedule)
     current_date = schedule.start_date
@@ -151,6 +155,7 @@ def rotate_session_qr_if_expired(session, *, reference_time=None):
     - limits the lifetime of a copied/shared QR token
     - narrows replay opportunities to a short server-defined interval
     """
+    # Called by QR status/scan flows to enforce short-lived tokens.
     now = reference_time or timezone.now()
     if session.is_qr_token_expired(now):
         session.rotate_qr_token(reference_time=now, save=True)
@@ -165,10 +170,12 @@ def get_session_qr_status(session, *, rotate_if_expired=False, reference_time=No
     If rotate_if_expired=True, this call becomes authoritative and will rotate
     expired tokens before returning the final current token.
     """
+    # Returns exactly what frontend QR screens need (token + countdown + status).
     now = reference_time or timezone.now()
     lifecycle_status = ensure_session_lifecycle_state(session, reference_time=now)
     can_accept_attendance = session.is_accepting_attendance(reference_time=now)
     if rotate_if_expired and can_accept_attendance:
+        # Admin QR display can auto-rotate expired tokens before returning.
         rotate_session_qr_if_expired(session, reference_time=now)
 
     expires_at = session.get_qr_expiry_time()
@@ -190,6 +197,7 @@ def get_session_by_qr_token(qr_token: str):
 
     Returning None means the QR token is unknown/invalid.
     """
+    # Used by faculty preview/scan to map a scanned token back to one session.
     return AttendanceSession.objects.filter(qr_token=qr_token).first()
 
 
@@ -325,6 +333,7 @@ def create_signed_attendance_record(*, user, session, attendance_type: str, is_l
     - avoids storing signature without the corresponding record
     """
     with transaction.atomic():
+        # Step 1: create the attendance record first.
         # Record creation uses server timestamp (auto_now_add in model check_time).
         record = AttendanceRecord.objects.create(
             user=user,
@@ -334,6 +343,7 @@ def create_signed_attendance_record(*, user, session, attendance_type: str, is_l
             is_late=is_late,
         )
 
+        # Step 2: build a deterministic payload from important record data.
         # Build canonical payload text first, then sign it using DSA private key.
         payload = build_attendance_payload(
             user=user,
@@ -341,8 +351,10 @@ def create_signed_attendance_record(*, user, session, attendance_type: str, is_l
             attendance_type=attendance_type,
             timestamp=record.check_time,
         )
+        # Step 3: sign payload with DSA private key.
         signature = sign_payload(payload)
 
+        # Step 4: save payload + signature so integrity can be verified later.
         # Store both payload and signature for later verification/audit.
         record.signed_payload = payload
         record.signature = signature
@@ -352,6 +364,8 @@ def create_signed_attendance_record(*, user, session, attendance_type: str, is_l
 
 def is_record_signature_valid(record: AttendanceRecord) -> bool:
     """Return True only when stored payload/signature verify with DSA public key."""
+    # If either payload or signature is missing, integrity check cannot pass.
     if not record.signed_payload or not record.signature:
         return False
+    # Public-key verification result tells whether stored data was modified.
     return verify_payload_signature(record.signed_payload, record.signature)

@@ -30,6 +30,7 @@ class CreateSessionView(APIView):
     permission_classes = [permissions.IsAuthenticated, IsAdminRole]
 
     def post(self, request):
+        # Admin creates sessions; each session stores QR rotation settings.
         serializer = CreateSessionSerializer(data=request.data, context={"request": request})
         try:
             serializer.is_valid(raise_exception=True)
@@ -45,6 +46,7 @@ class CreateSessionView(APIView):
         data = serializer.validated_data
 
         if data.get("is_recurring"):
+            # Store recurring template, then generate per-date sessions with their own QR tokens.
             # Store the recurring template so generated sessions remain traceable.
             schedule = AttendanceSchedule.objects.create(
                 name=data["name"],
@@ -78,6 +80,7 @@ class CreateSessionView(APIView):
             )
 
         # Single mode now uses the same rule-based window fields, anchored to one session_date.
+        # Single-mode session also includes QR refresh interval used by QR display screens.
         datetime_windows = serializer.build_single_session_datetimes()
         session = AttendanceSession.objects.create(
             name=data["name"],
@@ -114,6 +117,7 @@ class AdminSessionListView(APIView):
     permission_classes = [permissions.IsAuthenticated, IsAdminRole]
 
     def get(self, request):
+        # Frontend uses this to populate session pickers and QR display pages.
         sessions = list(get_session_queryset_with_counts())
         # Keep persisted is_active aligned with lifecycle whenever admin lists sessions.
         for session in sessions:
@@ -164,6 +168,7 @@ class VerifySignatureView(APIView):
     permission_classes = [permissions.IsAuthenticated, IsAdminRole]
 
     def post(self, request):
+        # Request body expects a single attendance_record_id.
         serializer = VerifySignatureSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         attendance_record_id = serializer.validated_data["attendance_record_id"]
@@ -178,6 +183,8 @@ class VerifySignatureView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
+        # DSA integrity check: uses stored payload + signature and backend public key.
+        # If data was changed without re-signing with private key, this becomes False.
         # Verify whether stored payload/signature are still consistent.
         is_valid = is_record_signature_valid(record)
         return Response(
@@ -207,6 +214,7 @@ class SessionQrStatusView(APIView):
     permission_classes = [permissions.IsAuthenticated, IsAdminRole]
 
     def get(self, request, session_id):
+        # Main QR status endpoint used by frontend polling (token + expiry + countdown).
         try:
             session = AttendanceSession.objects.get(id=session_id)
         except AttendanceSession.DoesNotExist:
@@ -215,6 +223,7 @@ class SessionQrStatusView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
+        # rotate_if_expired keeps frontend always synced to the latest valid token.
         qr_status = get_session_qr_status(session, rotate_if_expired=True)
         return Response(
             {

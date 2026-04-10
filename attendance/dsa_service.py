@@ -29,6 +29,7 @@ def _load_private_key():
 
     The key content is expected in PEM format (multiline string).
     """
+    # Read private key from environment-backed Django settings.
     private_key_pem = getattr(settings, "DSA_PRIVATE_KEY", "")
     if not private_key_pem:
         raise ImproperlyConfigured("DSA_PRIVATE_KEY is not configured.")
@@ -45,6 +46,7 @@ def _load_public_key():
 
     The key content is expected in PEM format (multiline string).
     """
+    # Read public key from environment-backed Django settings.
     public_key_pem = getattr(settings, "DSA_PUBLIC_KEY", "")
     if not public_key_pem:
         raise ImproperlyConfigured("DSA_PUBLIC_KEY is not configured.")
@@ -70,6 +72,7 @@ def build_attendance_payload(*, user, session, attendance_type, timestamp):
     - attendance_type
     - timestamp
     """
+    # Build one canonical text block that is later signed and audited.
     full_name = f"{user.first_name} {user.last_name}".strip()
 
     # Keep line order stable so the same logical data always yields the same payload text.
@@ -94,6 +97,7 @@ def sign_payload(payload: str) -> str:
 
     Signature bytes are base64-encoded for JSON/database storage.
     """
+    # DSA signing happens only on the backend using the private key.
     private_key = _load_private_key()
     signature_bytes = private_key.sign(payload.encode("utf-8"), hashes.SHA256())
     return base64.b64encode(signature_bytes).decode("utf-8")
@@ -107,6 +111,7 @@ def verify_payload_signature(payload: str, signature_base64: str) -> bool:
     - True: signature matches payload (record has not been tampered with)
     - False: signature is invalid or malformed for this payload
     """
+    # Verification uses the public key; this is what detects tampering.
     public_key = _load_public_key()
     try:
         signature_bytes = base64.b64decode(signature_base64.encode("utf-8"))

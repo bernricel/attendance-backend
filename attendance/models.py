@@ -49,6 +49,7 @@ class AttendanceSchedule(models.Model):
         ordering = ("-created_at",)
 
     def __str__(self):
+        # Human-readable label shown in Django admin and logs.
         return self.name
 
 
@@ -105,6 +106,7 @@ class AttendanceSession(models.Model):
         We intentionally derive this dynamically so recurring occurrences do not
         need scheduled background jobs just to move between UPCOMING/ACTIVE/ENDED.
         """
+        # Server time is the source of truth for session status.
         now = reference_time or timezone.now()
         if now < self.start_time:
             return self.LifecycleStatus.UPCOMING
@@ -114,6 +116,7 @@ class AttendanceSession(models.Model):
 
     def is_accepting_attendance(self, reference_time=None):
         """Attendance is accepted only while ACTIVE and manually active."""
+        # Both checks must pass: lifecycle is ACTIVE and session is not manually disabled.
         return self.is_active and self.get_lifecycle_status(reference_time) == self.LifecycleStatus.ACTIVE
 
     def sync_active_flag_with_lifecycle(self, reference_time=None, save=True):
@@ -123,6 +126,7 @@ class AttendanceSession(models.Model):
         This guarantees ended sessions are archived from an operational standpoint
         even if no explicit admin action is taken.
         """
+        # Auto-close sessions after end_time so QR scanning is blocked.
         status = self.get_lifecycle_status(reference_time)
         changed = False
         if status == self.LifecycleStatus.ENDED and self.is_active:
@@ -134,10 +138,12 @@ class AttendanceSession(models.Model):
 
     def get_qr_expiry_time(self):
         """Return the server timestamp when the current QR token expires."""
+        # Expiry = last rotation time + refresh interval.
         return self.qr_token_last_rotated_at + timedelta(seconds=self.qr_refresh_interval_seconds)
 
     def is_qr_token_expired(self, reference_time=None):
         """Check whether the current QR token has passed its refresh interval."""
+        # If True, clients should fetch a fresh QR token from the backend.
         now = reference_time or timezone.now()
         return now >= self.get_qr_expiry_time()
 
@@ -149,6 +155,7 @@ class AttendanceSession(models.Model):
         - Previous token becomes invalid after rotation.
         - Rotation time is tracked so the server can enforce token expiry.
         """
+        # Generate a brand-new token so old screenshots/links become unusable.
         now = reference_time or timezone.now()
         self.qr_token = uuid.uuid4().hex
         self.qr_token_last_rotated_at = now
@@ -157,6 +164,7 @@ class AttendanceSession(models.Model):
         return self.qr_token
 
     def __str__(self):
+        # Human-readable label shown in Django admin and logs.
         return self.name
 
 
@@ -196,4 +204,5 @@ class AttendanceRecord(models.Model):
         ]
 
     def __str__(self):
+        # Compact record label for admin list and debugging output.
         return f"{self.user.email} - {self.session.name}"

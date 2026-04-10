@@ -297,6 +297,7 @@ class AttendanceRecordSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = AttendanceRecord
+        # Include signed_payload + signature so records are auditable and verifiable.
         fields = (
             "id",
             "user_email",
@@ -324,6 +325,7 @@ class ScanAttendanceSerializer(serializers.Serializer):
 
 
 class VerifySignatureSerializer(serializers.Serializer):
+    # Simple input contract for /admin/verify-signature endpoint.
     attendance_record_id = serializers.IntegerField(required=True, min_value=1)
 
 

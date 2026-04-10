@@ -26,6 +26,7 @@ class FacultySessionPreviewView(APIView):
     permission_classes = [permissions.IsAuthenticated, IsFacultyRole]
 
     def get(self, request):
+        # Preview endpoint lets faculty confirm details before submitting attendance.
         # Faculty client sends qr_token from scanned QR URL/query parameter.
         qr_token = (request.query_params.get("qr_token") or "").strip()
         if not qr_token:
@@ -34,6 +35,7 @@ class FacultySessionPreviewView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # Token lookup resolves which session this QR belongs to.
         session = get_session_by_qr_token(qr_token)
         if not session:
             return Response(
@@ -41,6 +43,7 @@ class FacultySessionPreviewView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
+        # Lifecycle checks prevent preview/scan of sessions that are not usable.
         lifecycle_status = ensure_session_lifecycle_state(session)
         if lifecycle_status == session.LifecycleStatus.ENDED:
             return Response(
@@ -74,6 +77,7 @@ class FacultyAttendanceHistoryView(APIView):
     permission_classes = [permissions.IsAuthenticated, IsFacultyRole]
 
     def get(self, request):
+        # Utility endpoint for faculty history page (not QR generation, but related flow feedback).
         records = (
             AttendanceRecord.objects.select_related("user", "session")
             .filter(user=request.user)
@@ -101,6 +105,7 @@ class ScanAttendanceView(APIView):
     permission_classes = [permissions.IsAuthenticated, IsFacultyRole]
 
     def post(self, request):
+        # Final QR submit endpoint: validates token/window rules then records attendance.
         # Input validation (qr_token is required; attendance_type is optional).
         serializer = ScanAttendanceSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -130,6 +135,8 @@ class ScanAttendanceView(APIView):
                 status=validation.http_status,
             )
 
+        # This service call creates the record and signs it with DSA in one transaction.
+        # Frontend receives the created record in the response payload below.
         # DSA payload signing and persistence happen in the service layer.
         record = create_signed_attendance_record(
             user=request.user,
