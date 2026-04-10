@@ -305,6 +305,12 @@ class DeleteSessionView(APIView):
         serializer = AdminSessionDeleteSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
+        if not request.user.is_active:
+            return Response(
+                {"success": False, "message": "This admin account is disabled."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         if not request.user.check_password(serializer.validated_data["password"]):
             return Response(
                 {"success": False, "message": "Incorrect password. Session deletion was not performed."},
