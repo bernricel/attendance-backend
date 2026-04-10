@@ -308,9 +308,14 @@ def validate_session_for_scan(*, user, session, attendance_type: str, scanned_qr
         session=session,
         attendance_type=requested_type,
     ).exists():
+        duplicate_message = (
+            "You have already checked in for this session."
+            if requested_type == AttendanceRecord.AttendanceType.CHECK_IN
+            else "You have already checked out for this session."
+        )
         return ScanValidationResult(
             is_valid=False,
-            message=f"{requested_type} attendance already recorded for this session.",
+            message=duplicate_message,
             http_status=409,
             lifecycle_status=lifecycle_status,
         )
