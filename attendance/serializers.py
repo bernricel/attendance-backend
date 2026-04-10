@@ -96,10 +96,22 @@ class CreateSessionSerializer(serializers.Serializer):
     recurrence_days = serializers.ListField(
         child=serializers.ChoiceField(choices=[0, 1, 2, 3, 4, 5, 6]),
         required=False,
-        allow_empty=False,
+        # Allow empty input so non-custom recurrence can be derived server-side.
+        allow_empty=True,
     )
     recurrence_start_date = serializers.DateField(required=False)
     recurrence_end_date = serializers.DateField(required=False)
+
+    @staticmethod
+    def _resolve_pattern_days(recurrence_pattern):
+        if recurrence_pattern == AttendanceSchedule.RecurrencePattern.WEEKDAYS:
+            return [0, 1, 2, 3, 4]
+        if recurrence_pattern == AttendanceSchedule.RecurrencePattern.MWF:
+            return [0, 2, 4]
+        if recurrence_pattern == AttendanceSchedule.RecurrencePattern.TTH:
+            return [1, 3]
+        return []
+
     def validate(self, attrs):
         title = attrs.get("title") or attrs.get("name")
         if not title:
@@ -151,11 +163,18 @@ class CreateSessionSerializer(serializers.Serializer):
         if attrs["recurrence_start_date"] > attrs["recurrence_end_date"]:
             raise serializers.ValidationError("recurrence_end_date must be on or after recurrence_start_date.")
 
-        if (
-            attrs["recurrence_pattern"] == AttendanceSchedule.RecurrencePattern.CUSTOM
-            and not attrs.get("recurrence_days")
-        ):
+        recurrence_pattern = attrs["recurrence_pattern"]
+        recurrence_days = sorted(set(attrs.get("recurrence_days", [])))
+
+        if recurrence_pattern == AttendanceSchedule.RecurrencePattern.CUSTOM and not recurrence_days:
             raise serializers.ValidationError("recurrence_days must include at least one weekday for custom pattern.")
+
+        # Normalize recurrence_days so recurring generation always has concrete weekdays.
+        attrs["recurrence_days"] = (
+            recurrence_days
+            if recurrence_pattern == AttendanceSchedule.RecurrencePattern.CUSTOM
+            else self._resolve_pattern_days(recurrence_pattern)
+        )
 
         return attrs
 
