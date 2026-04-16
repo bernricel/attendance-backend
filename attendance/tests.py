@@ -48,6 +48,9 @@ class AttendanceApiTests(APITestCase):
             "late_threshold_time": now - timedelta(minutes=1),
             "check_out_start_time": now + timedelta(hours=6),
             "check_out_end_time": now + timedelta(hours=8),
+            "enable_check_in_window": True,
+            "enable_check_out_window": True,
+            "session_end_time": now + timedelta(hours=7),
             "is_active": True,
             "created_by": self.admin_user,
         }
@@ -61,12 +64,12 @@ class AttendanceApiTests(APITestCase):
             "title": "Morning Faculty Attendance",
             "session_date": session_date,
             "scheduled_start_time": "08:00:00",
-            "scheduled_end_time": "17:00:00",
             "check_in_start_time": "07:30:00",
             "check_in_end_time": "08:15:00",
-            "late_threshold_time": "08:00:00",
             "check_out_start_time": "16:30:00",
             "check_out_end_time": "17:30:00",
+            "enable_check_in_window": True,
+            "enable_check_out_window": True,
             "is_active": True,
             "qr_refresh_interval_seconds": 45,
             "is_recurring": False,
@@ -79,6 +82,7 @@ class AttendanceApiTests(APITestCase):
         self.assertEqual(response.data["session"]["session_type"], "mixed")
         self.assertEqual(response.data["session"]["department"], "CIT")
         self.assertEqual(response.data["session"]["qr_refresh_interval_seconds"], 45)
+        self.assertIsNone(response.data["session"]["late_threshold_time"])
 
     def test_admin_can_create_rule_based_recurring_schedule(self):
         self._admin_auth()
@@ -177,6 +181,25 @@ class AttendanceApiTests(APITestCase):
         record = AttendanceRecord.objects.get(user=self.faculty_user, session=session, attendance_type="check-in")
         self.assertTrue(record.is_late)
 
+    def test_scan_without_late_threshold_does_not_mark_late(self):
+        now = timezone.now()
+        session = self._create_rule_session(
+            check_in_start_time=now - timedelta(minutes=15),
+            check_in_end_time=now + timedelta(minutes=15),
+            late_threshold_time=None,
+        )
+
+        self._faculty_auth()
+        response = self.client.post(
+            "/api/attendance/scan",
+            {"qr_token": session.qr_token, "attendance_type": "check-in"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        record = AttendanceRecord.objects.get(user=self.faculty_user, session=session, attendance_type="check-in")
+        self.assertFalse(record.is_late)
+
     def test_scan_rejects_outside_window(self):
         now = timezone.now()
         session = self._create_rule_session(
@@ -194,6 +217,41 @@ class AttendanceApiTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("outside the allowed check-in window", response.data["message"])
+
+    def test_scan_allows_check_in_anytime_when_check_in_window_disabled(self):
+        now = timezone.now()
+        session = self._create_rule_session(
+            enable_check_in_window=False,
+            check_in_start_time=None,
+            check_in_end_time=None,
+            late_threshold_time=now - timedelta(minutes=5),
+        )
+
+        self._faculty_auth()
+        response = self.client.post(
+            "/api/attendance/scan",
+            {"qr_token": session.qr_token, "attendance_type": "check-in"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+    def test_scan_allows_open_ended_check_out_window(self):
+        now = timezone.now()
+        session = self._create_rule_session(
+            check_out_start_time=now - timedelta(minutes=5),
+            check_out_end_time=None,
+            session_end_time=now + timedelta(hours=1),
+        )
+
+        self._faculty_auth()
+        response = self.client.post(
+            "/api/attendance/scan",
+            {"qr_token": session.qr_token, "attendance_type": "check-out"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 
     def test_scan_rejects_ended_session_and_auto_deactivates(self):
         now = timezone.now()
@@ -279,6 +337,24 @@ class AttendanceApiTests(APITestCase):
         self.assertNotEqual(response.data["qr_token"], old_token)
         self.assertIn("seconds_until_rotation", response.data)
 
+    def test_session_without_session_end_time_remains_active_after_end_time(self):
+        now = timezone.now()
+        session = self._create_rule_session(
+            start_time=now - timedelta(hours=3),
+            end_time=now - timedelta(hours=2),
+            session_end_time=None,
+            is_active=True,
+        )
+
+        self._admin_auth()
+        response = self.client.get("/api/admin/sessions")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        listed_session = next(item for item in response.data["sessions"] if item["id"] == session.id)
+        self.assertEqual(listed_session["lifecycle_status"], "ACTIVE")
+        session.refresh_from_db()
+        self.assertTrue(session.is_active)
+
     def test_admin_can_fetch_faculty_attendance_history(self):
         session = self._create_rule_session(name="Faculty History Session", department="CIT")
         AttendanceRecord.objects.create(
@@ -352,3 +428,22 @@ class AttendanceApiTests(APITestCase):
         self.assertEqual(response.data["deleted_attendance_records"], 2)
         self.assertFalse(AttendanceSession.objects.filter(id=session.id).exists())
         self.assertEqual(AttendanceRecord.objects.filter(session_id=session.id).count(), 0)
+
+    def test_admin_can_end_session_without_deleting_attendance_records(self):
+        session = self._create_rule_session(name="Manual End Session")
+        AttendanceRecord.objects.create(
+            user=self.faculty_user,
+            session=session,
+            attendance_type=AttendanceRecord.AttendanceType.CHECK_IN,
+            is_late=False,
+        )
+
+        self._admin_auth()
+        response = self.client.post(f"/api/admin/sessions/{session.id}/end", {}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["success"])
+        session.refresh_from_db()
+        self.assertFalse(session.is_active)
+        self.assertIsNotNone(session.session_end_time)
+        self.assertEqual(AttendanceRecord.objects.filter(session_id=session.id).count(), 1)

@@ -1,3 +1,5 @@
+from datetime import time
+
 from django.utils import timezone
 from django.db import transaction
 from rest_framework.exceptions import ValidationError
@@ -50,19 +52,25 @@ class CreateSessionView(APIView):
         data = serializer.validated_data
 
         if data.get("is_recurring"):
+            recurring_start_time = data.get("effective_start_time") or time(0, 0)
+            recurring_session_end_time = data.get("session_end_time")
+            recurring_check_in_start = data.get("check_in_start_time") or recurring_start_time
+            recurring_check_in_end = data.get("check_in_end_time") or recurring_check_in_start
+            recurring_check_out_start = data.get("check_out_start_time") or recurring_start_time
+            recurring_check_out_end = data.get("check_out_end_time") or recurring_check_out_start
             # Store recurring template, then generate per-date sessions with their own QR tokens.
             # Store the recurring template so generated sessions remain traceable.
             schedule = AttendanceSchedule.objects.create(
                 name=data["name"],
                 department=data["department"],
                 session_type=AttendanceSession.SessionType.MIXED,
-                start_time=data["scheduled_start_time"],
-                end_time=data["scheduled_end_time"],
-                check_in_start_time=data["check_in_start_time"],
-                check_in_end_time=data["check_in_end_time"],
-                late_threshold_time=data["late_threshold_time"],
-                check_out_start_time=data["check_out_start_time"],
-                check_out_end_time=data["check_out_end_time"],
+                start_time=recurring_start_time,
+                end_time=recurring_session_end_time or recurring_start_time,
+                check_in_start_time=recurring_check_in_start,
+                check_in_end_time=recurring_check_in_end,
+                late_threshold_time=data.get("late_threshold_time") or recurring_start_time,
+                check_out_start_time=recurring_check_out_start,
+                check_out_end_time=recurring_check_out_end,
                 recurrence_pattern=data["recurrence_pattern"],
                 custom_weekdays=",".join(str(day) for day in sorted(set(data.get("recurrence_days", [])))),
                 start_date=data["recurrence_start_date"],
@@ -70,7 +78,17 @@ class CreateSessionView(APIView):
                 qr_refresh_interval_seconds=data["qr_refresh_interval_seconds"],
                 created_by=request.user,
             )
-            generation_summary = generate_sessions_from_schedule(schedule)
+            generation_summary = generate_sessions_from_schedule(
+                schedule,
+                enable_check_in_window=data["enable_check_in_window"],
+                enable_check_out_window=data["enable_check_out_window"],
+                allow_open_ended_check_in=data["enable_check_in_window"] and not data.get("check_in_end_time"),
+                allow_open_ended_check_out=data["enable_check_out_window"] and not data.get("check_out_end_time"),
+                late_threshold_time_override=data.get("late_threshold_time"),
+                late_threshold_time_explicit="late_threshold_time" in serializer.initial_data,
+                session_end_time_override=data.get("session_end_time"),
+                session_end_time_explicit="session_end_time" in serializer.initial_data,
+            )
             sessions = AttendanceSession.objects.filter(id__in=generation_summary["created_session_ids"]).order_by("start_time")
             return Response(
                 {
@@ -97,6 +115,9 @@ class CreateSessionView(APIView):
             late_threshold_time=datetime_windows["late_threshold_time"],
             check_out_start_time=datetime_windows["check_out_start_time"],
             check_out_end_time=datetime_windows["check_out_end_time"],
+            enable_check_in_window=data["enable_check_in_window"],
+            enable_check_out_window=data["enable_check_out_window"],
+            session_end_time=datetime_windows["session_end_time"],
             is_active=data["is_active"],
             qr_refresh_interval_seconds=data["qr_refresh_interval_seconds"],
             created_by=request.user,
@@ -336,6 +357,39 @@ class DeleteSessionView(APIView):
                 "session_id": session_id,
                 "session_name": session_name,
                 "deleted_attendance_records": deleted_attendance_count,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class EndSessionView(APIView):
+    """Manually end a session without deleting attendance records."""
+
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [permissions.IsAuthenticated, IsAdminRole]
+
+    def post(self, request, session_id):
+        try:
+            with transaction.atomic():
+                session = AttendanceSession.objects.select_for_update().get(id=session_id)
+                now = timezone.now()
+                session.is_active = False
+                if session.session_end_time is None or session.session_end_time > now:
+                    session.session_end_time = now
+                    session.save(update_fields=["is_active", "session_end_time"])
+                else:
+                    session.save(update_fields=["is_active"])
+        except AttendanceSession.DoesNotExist:
+            return Response(
+                {"success": False, "message": "Attendance session not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        return Response(
+            {
+                "success": True,
+                "message": "Session ended successfully. Attendance records were preserved.",
+                "session": AttendanceSessionSerializer(session).data,
             },
             status=status.HTTP_200_OK,
         )

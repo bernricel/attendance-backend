@@ -60,7 +60,18 @@ def _resolve_schedule_weekdays(schedule: AttendanceSchedule) -> set[int]:
     return set()
 
 
-def generate_sessions_from_schedule(schedule: AttendanceSchedule):
+def generate_sessions_from_schedule(
+    schedule: AttendanceSchedule,
+    *,
+    enable_check_in_window=True,
+    enable_check_out_window=True,
+    allow_open_ended_check_in=False,
+    allow_open_ended_check_out=False,
+    late_threshold_time_override=None,
+    late_threshold_time_explicit=False,
+    session_end_time_override=None,
+    session_end_time_explicit=False,
+):
     """
     Generate attendance sessions for every matching date in the schedule range.
 
@@ -86,26 +97,59 @@ def generate_sessions_from_schedule(schedule: AttendanceSchedule):
                 datetime.combine(current_date, schedule.end_time),
                 timezone=timezone_info,
             )
-            check_in_start_dt = timezone.make_aware(
-                datetime.combine(current_date, schedule.check_in_start_time),
-                timezone=timezone_info,
-            )
-            check_in_end_dt = timezone.make_aware(
-                datetime.combine(current_date, schedule.check_in_end_time),
-                timezone=timezone_info,
-            )
-            late_threshold_dt = timezone.make_aware(
-                datetime.combine(current_date, schedule.late_threshold_time),
-                timezone=timezone_info,
-            )
-            check_out_start_dt = timezone.make_aware(
-                datetime.combine(current_date, schedule.check_out_start_time),
-                timezone=timezone_info,
-            )
-            check_out_end_dt = timezone.make_aware(
-                datetime.combine(current_date, schedule.check_out_end_time),
-                timezone=timezone_info,
-            )
+            check_in_start_dt = None
+            if enable_check_in_window:
+                check_in_start_dt = timezone.make_aware(
+                    datetime.combine(current_date, schedule.check_in_start_time),
+                    timezone=timezone_info,
+                )
+            check_in_end_dt = None
+            if enable_check_in_window and not allow_open_ended_check_in:
+                check_in_end_dt = timezone.make_aware(
+                    datetime.combine(current_date, schedule.check_in_end_time),
+                    timezone=timezone_info,
+                )
+            if late_threshold_time_explicit:
+                late_threshold_dt = (
+                    timezone.make_aware(
+                        datetime.combine(current_date, late_threshold_time_override),
+                        timezone=timezone_info,
+                    )
+                    if late_threshold_time_override
+                    else None
+                )
+            else:
+                late_threshold_dt = (
+                    timezone.make_aware(
+                        datetime.combine(current_date, schedule.late_threshold_time),
+                        timezone=timezone_info,
+                    )
+                    if schedule.late_threshold_time
+                    else None
+                )
+            check_out_start_dt = None
+            if enable_check_out_window:
+                check_out_start_dt = timezone.make_aware(
+                    datetime.combine(current_date, schedule.check_out_start_time),
+                    timezone=timezone_info,
+                )
+            check_out_end_dt = None
+            if enable_check_out_window and not allow_open_ended_check_out:
+                check_out_end_dt = timezone.make_aware(
+                    datetime.combine(current_date, schedule.check_out_end_time),
+                    timezone=timezone_info,
+                )
+            if session_end_time_explicit:
+                session_end_dt = (
+                    timezone.make_aware(
+                        datetime.combine(current_date, session_end_time_override),
+                        timezone=timezone_info,
+                    )
+                    if session_end_time_override
+                    else None
+                )
+            else:
+                session_end_dt = end_dt
             already_exists = AttendanceSession.objects.filter(
                 name=f"{schedule.name} ({current_date.isoformat()})",
                 start_time=start_dt,
@@ -115,6 +159,9 @@ def generate_sessions_from_schedule(schedule: AttendanceSchedule):
                 late_threshold_time=late_threshold_dt,
                 check_out_start_time=check_out_start_dt,
                 check_out_end_time=check_out_end_dt,
+                enable_check_in_window=enable_check_in_window,
+                enable_check_out_window=enable_check_out_window,
+                session_end_time=session_end_dt,
             ).exists()
 
             if already_exists:
@@ -131,6 +178,9 @@ def generate_sessions_from_schedule(schedule: AttendanceSchedule):
                     late_threshold_time=late_threshold_dt,
                     check_out_start_time=check_out_start_dt,
                     check_out_end_time=check_out_end_dt,
+                    enable_check_in_window=enable_check_in_window,
+                    enable_check_out_window=enable_check_out_window,
+                    session_end_time=session_end_dt,
                     is_active=True,
                     qr_refresh_interval_seconds=schedule.qr_refresh_interval_seconds,
                     parent_schedule=schedule,
@@ -250,20 +300,39 @@ def validate_session_for_scan(*, user, session, attendance_type: str, scanned_qr
         )
 
     # Step 3: Use server-side time (not client device time) to enforce fairness.
+    def _is_action_allowed(enable_window, window_start, window_end):
+        if not enable_window:
+            return True
+        if not window_start:
+            return False
+        if now < window_start:
+            return False
+        if window_end and now > window_end:
+            return False
+        return True
+
+    can_check_in_now = _is_action_allowed(
+        session.enable_check_in_window,
+        session.check_in_start_time,
+        session.check_in_end_time,
+    )
+    can_check_out_now = _is_action_allowed(
+        session.enable_check_out_window,
+        session.check_out_start_time,
+        session.check_out_end_time,
+    )
+
     requested_type = attendance_type or ""
     if requested_type not in {
         AttendanceRecord.AttendanceType.CHECK_IN,
         AttendanceRecord.AttendanceType.CHECK_OUT,
     }:
         # If client does not send a type, infer it from active rule window.
-        in_check_in_window = session.check_in_start_time <= now <= session.check_in_end_time
-        in_check_out_window = session.check_out_start_time <= now <= session.check_out_end_time
-
-        if in_check_in_window and not in_check_out_window:
+        if can_check_in_now and not can_check_out_now:
             requested_type = AttendanceRecord.AttendanceType.CHECK_IN
-        elif in_check_out_window and not in_check_in_window:
+        elif can_check_out_now and not can_check_in_now:
             requested_type = AttendanceRecord.AttendanceType.CHECK_OUT
-        elif in_check_in_window and in_check_out_window:
+        elif can_check_in_now and can_check_out_now:
             # Deterministic tie-breaker for overlapping windows.
             requested_type = AttendanceRecord.AttendanceType.CHECK_IN
         else:
@@ -275,7 +344,7 @@ def validate_session_for_scan(*, user, session, attendance_type: str, scanned_qr
             )
 
     if requested_type == AttendanceRecord.AttendanceType.CHECK_IN:
-        if now < session.check_in_start_time or now > session.check_in_end_time:
+        if not can_check_in_now:
             return ScanValidationResult(
                 is_valid=False,
                 message="Current time is outside the allowed check-in window.",
@@ -283,7 +352,7 @@ def validate_session_for_scan(*, user, session, attendance_type: str, scanned_qr
                 lifecycle_status=lifecycle_status,
             )
     elif requested_type == AttendanceRecord.AttendanceType.CHECK_OUT:
-        if now < session.check_out_start_time or now > session.check_out_end_time:
+        if not can_check_out_now:
             return ScanValidationResult(
                 is_valid=False,
                 message="Current time is outside the allowed check-out window.",
@@ -320,7 +389,11 @@ def validate_session_for_scan(*, user, session, attendance_type: str, scanned_qr
             lifecycle_status=lifecycle_status,
         )
 
-    is_late = requested_type == AttendanceRecord.AttendanceType.CHECK_IN and now > session.late_threshold_time
+    is_late = (
+        requested_type == AttendanceRecord.AttendanceType.CHECK_IN
+        and session.late_threshold_time is not None
+        and now > session.late_threshold_time
+    )
     return ScanValidationResult(
         is_valid=True,
         resolved_attendance_type=requested_type,

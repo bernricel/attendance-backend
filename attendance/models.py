@@ -72,11 +72,14 @@ class AttendanceSession(models.Model):
     start_time = models.DateTimeField()
     end_time = models.DateTimeField()
     # Rule-based attendance windows.
-    check_in_start_time = models.DateTimeField()
-    check_in_end_time = models.DateTimeField()
-    late_threshold_time = models.DateTimeField()
-    check_out_start_time = models.DateTimeField()
-    check_out_end_time = models.DateTimeField()
+    check_in_start_time = models.DateTimeField(null=True, blank=True)
+    check_in_end_time = models.DateTimeField(null=True, blank=True)
+    late_threshold_time = models.DateTimeField(null=True, blank=True)
+    check_out_start_time = models.DateTimeField(null=True, blank=True)
+    check_out_end_time = models.DateTimeField(null=True, blank=True)
+    enable_check_in_window = models.BooleanField(default=False)
+    enable_check_out_window = models.BooleanField(default=False)
+    session_end_time = models.DateTimeField(null=True, blank=True)
     is_active = models.BooleanField(default=True)
     qr_token = models.CharField(max_length=64, unique=True, default=uuid.uuid4, editable=False)
     # Security hardening: QR code token rotates periodically to reduce replay risk.
@@ -110,7 +113,7 @@ class AttendanceSession(models.Model):
         now = reference_time or timezone.now()
         if now < self.start_time:
             return self.LifecycleStatus.UPCOMING
-        if now > self.end_time:
+        if (self.session_end_time and now > self.session_end_time) or not self.is_active:
             return self.LifecycleStatus.ENDED
         return self.LifecycleStatus.ACTIVE
 
@@ -121,12 +124,12 @@ class AttendanceSession(models.Model):
 
     def sync_active_flag_with_lifecycle(self, reference_time=None, save=True):
         """
-        Automatically deactivate sessions after their end_time.
+        Automatically deactivate sessions after their configured session_end_time.
 
         This guarantees ended sessions are archived from an operational standpoint
         even if no explicit admin action is taken.
         """
-        # Auto-close sessions after end_time so QR scanning is blocked.
+        # Auto-close sessions after session_end_time so QR scanning is blocked.
         status = self.get_lifecycle_status(reference_time)
         changed = False
         if status == self.LifecycleStatus.ENDED and self.is_active:

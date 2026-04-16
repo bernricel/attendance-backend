@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, time
 
 from django.conf import settings
 from django.db.models import Count
@@ -29,6 +29,9 @@ class AttendanceSessionSerializer(serializers.ModelSerializer):
             "late_threshold_time",
             "check_out_start_time",
             "check_out_end_time",
+            "enable_check_in_window",
+            "enable_check_out_window",
+            "session_end_time",
             "is_active",
             "lifecycle_status",
             "can_accept_attendance",
@@ -62,8 +65,8 @@ class CreateSessionSerializer(serializers.Serializer):
     """
     Unified input serializer for both single and recurring session creation.
 
-    - is_recurring=False: expects start_time/end_time datetime fields.
-    - is_recurring=True: expects recurrence fields and time-of-day fields.
+    - is_recurring=False: expects session_date and optional time controls.
+    - is_recurring=True: expects recurrence fields and optional time controls.
     """
 
     # `title` is the preferred field for the new rule-based session structure.
@@ -79,14 +82,18 @@ class CreateSessionSerializer(serializers.Serializer):
     # Single-session mode fields.
     session_date = serializers.DateField(required=False)
 
-    # Shared rule windows (required for both single and recurring modes).
-    scheduled_start_time = serializers.TimeField(required=False)
-    scheduled_end_time = serializers.TimeField(required=False)
-    check_in_start_time = serializers.TimeField(required=False)
-    check_in_end_time = serializers.TimeField(required=False)
-    late_threshold_time = serializers.TimeField(required=False)
-    check_out_start_time = serializers.TimeField(required=False)
-    check_out_end_time = serializers.TimeField(required=False)
+    # Shared rule windows.
+    scheduled_start_time = serializers.TimeField(required=False, allow_null=True)
+    # Backward-compatible legacy alias. New clients should use session_end_time instead.
+    scheduled_end_time = serializers.TimeField(required=False, allow_null=True)
+    check_in_start_time = serializers.TimeField(required=False, allow_null=True)
+    check_in_end_time = serializers.TimeField(required=False, allow_null=True)
+    late_threshold_time = serializers.TimeField(required=False, allow_null=True)
+    check_out_start_time = serializers.TimeField(required=False, allow_null=True)
+    check_out_end_time = serializers.TimeField(required=False, allow_null=True)
+    enable_check_in_window = serializers.BooleanField(required=False, default=False)
+    enable_check_out_window = serializers.BooleanField(required=False, default=False)
+    session_end_time = serializers.TimeField(required=False, allow_null=True)
 
     # Recurring mode date rule fields.
     recurrence_pattern = serializers.ChoiceField(
@@ -121,29 +128,66 @@ class CreateSessionSerializer(serializers.Serializer):
         attrs["department"] = (getattr(settings, "DEFAULT_ATTENDANCE_DEPARTMENT", "CIT") or "CIT").strip()
 
         is_recurring = attrs.get("is_recurring", False)
-        required_rule_fields = (
-            "scheduled_start_time",
-            "scheduled_end_time",
-            "check_in_start_time",
-            "check_in_end_time",
-            "late_threshold_time",
-            "check_out_start_time",
-            "check_out_end_time",
-        )
-        missing_rule_fields = [field for field in required_rule_fields if not attrs.get(field)]
-        if missing_rule_fields:
-            raise serializers.ValidationError(
-                f"Missing required attendance rule fields: {', '.join(missing_rule_fields)}."
+        has_explicit_check_in_toggle = "enable_check_in_window" in self.initial_data
+        has_explicit_check_out_toggle = "enable_check_out_window" in self.initial_data
+        if not has_explicit_check_in_toggle:
+            attrs["enable_check_in_window"] = bool(
+                attrs.get("check_in_start_time") or attrs.get("check_in_end_time")
+            )
+        if not has_explicit_check_out_toggle:
+            attrs["enable_check_out_window"] = bool(
+                attrs.get("check_out_start_time") or attrs.get("check_out_end_time")
             )
 
-        if attrs["scheduled_start_time"] >= attrs["scheduled_end_time"]:
-            raise serializers.ValidationError("scheduled_end_time must be later than scheduled_start_time.")
-        if attrs["check_in_start_time"] >= attrs["check_in_end_time"]:
-            raise serializers.ValidationError("check_in_end_time must be later than check_in_start_time.")
-        if attrs["check_out_start_time"] >= attrs["check_out_end_time"]:
-            raise serializers.ValidationError("check_out_end_time must be later than check_out_start_time.")
-        if not (attrs["check_in_start_time"] <= attrs["late_threshold_time"] <= attrs["check_in_end_time"]):
-            raise serializers.ValidationError("late_threshold_time must be within the check-in window.")
+        effective_start_time = (
+            attrs.get("scheduled_start_time")
+            or attrs.get("check_in_start_time")
+            or attrs.get("check_out_start_time")
+            or attrs.get("late_threshold_time")
+            or time(0, 0)
+        )
+        attrs["effective_start_time"] = effective_start_time
+
+        # Single overall optional ending control, with legacy fallback for older clients.
+        overall_end_time = attrs.get("session_end_time")
+        if overall_end_time is None and "session_end_time" not in self.initial_data:
+            overall_end_time = attrs.get("scheduled_end_time")
+        attrs["session_end_time"] = overall_end_time
+        if overall_end_time and overall_end_time <= effective_start_time:
+            raise serializers.ValidationError("session_end_time must be later than the effective session start time.")
+
+        if attrs["enable_check_in_window"]:
+            if not attrs.get("check_in_start_time"):
+                raise serializers.ValidationError(
+                    "check_in_start_time is required when check-in window is enabled."
+                )
+            if attrs.get("check_in_end_time") and attrs["check_in_start_time"] >= attrs["check_in_end_time"]:
+                raise serializers.ValidationError("check_in_end_time must be later than check_in_start_time.")
+            if attrs.get("late_threshold_time") and attrs["late_threshold_time"] < attrs["check_in_start_time"]:
+                raise serializers.ValidationError(
+                    "late_threshold_time must be on or after check_in_start_time."
+                )
+            if (
+                attrs.get("late_threshold_time")
+                and
+                attrs.get("check_in_end_time")
+                and attrs["late_threshold_time"] > attrs["check_in_end_time"]
+            ):
+                raise serializers.ValidationError("late_threshold_time must be within the check-in window.")
+        else:
+            attrs["check_in_start_time"] = None
+            attrs["check_in_end_time"] = None
+
+        if attrs["enable_check_out_window"]:
+            if not attrs.get("check_out_start_time"):
+                raise serializers.ValidationError(
+                    "check_out_start_time is required when check-out window is enabled."
+                )
+            if attrs.get("check_out_end_time") and attrs["check_out_start_time"] >= attrs["check_out_end_time"]:
+                raise serializers.ValidationError("check_out_end_time must be later than check_out_start_time.")
+        else:
+            attrs["check_out_start_time"] = None
+            attrs["check_out_end_time"] = None
 
         if not is_recurring:
             if not attrs.get("session_date"):
@@ -187,29 +231,26 @@ class CreateSessionSerializer(serializers.Serializer):
         data = self.validated_data
         target_date = data["session_date"]
         tz_info = timezone.get_current_timezone()
+
+        def _to_aware_datetime(time_value):
+            if not time_value:
+                return None
+            return timezone.make_aware(datetime.combine(target_date, time_value), tz_info)
+
+        start_time_value = data.get("effective_start_time") or time(0, 0)
+        session_end_time_value = data.get("session_end_time")
+        start_dt = _to_aware_datetime(start_time_value)
+        session_end_dt = _to_aware_datetime(session_end_time_value)
+
         return {
-            "start_time": timezone.make_aware(datetime.combine(target_date, data["scheduled_start_time"]), tz_info),
-            "end_time": timezone.make_aware(datetime.combine(target_date, data["scheduled_end_time"]), tz_info),
-            "check_in_start_time": timezone.make_aware(
-                datetime.combine(target_date, data["check_in_start_time"]),
-                tz_info,
-            ),
-            "check_in_end_time": timezone.make_aware(
-                datetime.combine(target_date, data["check_in_end_time"]),
-                tz_info,
-            ),
-            "late_threshold_time": timezone.make_aware(
-                datetime.combine(target_date, data["late_threshold_time"]),
-                tz_info,
-            ),
-            "check_out_start_time": timezone.make_aware(
-                datetime.combine(target_date, data["check_out_start_time"]),
-                tz_info,
-            ),
-            "check_out_end_time": timezone.make_aware(
-                datetime.combine(target_date, data["check_out_end_time"]),
-                tz_info,
-            ),
+            "start_time": start_dt,
+            "end_time": session_end_dt or start_dt,
+            "session_end_time": session_end_dt,
+            "check_in_start_time": _to_aware_datetime(data.get("check_in_start_time")),
+            "check_in_end_time": _to_aware_datetime(data.get("check_in_end_time")),
+            "late_threshold_time": _to_aware_datetime(data.get("late_threshold_time")),
+            "check_out_start_time": _to_aware_datetime(data.get("check_out_start_time")),
+            "check_out_end_time": _to_aware_datetime(data.get("check_out_end_time")),
         }
 
 
@@ -367,6 +408,9 @@ class FacultySessionPreviewSerializer(serializers.ModelSerializer):
             "late_threshold_time",
             "check_out_start_time",
             "check_out_end_time",
+            "enable_check_in_window",
+            "enable_check_out_window",
+            "session_end_time",
             "is_active",
             "lifecycle_status",
             "can_accept_attendance",

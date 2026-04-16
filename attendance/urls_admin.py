@@ -5,6 +5,7 @@ from .views_admin import (
     AdminSessionListView,
     CreateSessionView,
     DeleteSessionView,
+    EndSessionView,
     FacultyAttendanceRecordsView,
     SessionQrStatusView,
     VerifySignatureView,
@@ -15,6 +16,7 @@ urlpatterns = [
     # Frontend session lists and selectors use this endpoint.
     path("sessions", AdminSessionListView.as_view(), name="admin-sessions"),
     path("sessions/<int:session_id>", DeleteSessionView.as_view(), name="admin-delete-session"),
+    path("sessions/<int:session_id>/end", EndSessionView.as_view(), name="admin-end-session"),
     # Frontend polls this endpoint for rotating QR token status/countdown.
     path("sessions/<int:session_id>/qr-status", SessionQrStatusView.as_view(), name="admin-session-qr-status"),
     path("attendance-by-date", AttendanceByDateView.as_view(), name="admin-attendance-by-date"),

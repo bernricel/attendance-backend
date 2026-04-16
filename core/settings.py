@@ -213,7 +213,7 @@ ALLOWED_GOOGLE_DOMAIN = _get_env("ALLOWED_GOOGLE_DOMAIN", "@ua.edu.ph")
 DEFAULT_ATTENDANCE_DEPARTMENT = _get_env("DEFAULT_ATTENDANCE_DEPARTMENT", "CIT")
 
 # DSA keys are loaded from env values (supports escaped newlines like \n).
-# Note for presentations: key-pair generation is done outside app runtime
+# Key-pair generation is done outside app runtime
 # (for example via OpenSSL), then injected here as environment secrets.
 _dsa_private_key_env = _get_env("DSA_PRIVATE_KEY", "")
 _dsa_public_key_env = _get_env("DSA_PUBLIC_KEY", "")
