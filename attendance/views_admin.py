@@ -2,6 +2,7 @@ from datetime import time
 import csv
 
 from django.http import HttpResponse
+from django.utils.dateparse import parse_datetime
 from django.utils import timezone
 from django.db import transaction
 from rest_framework.exceptions import ValidationError
@@ -38,6 +39,17 @@ ATTENDANCE_STATUS_LABELS = {
     "incomplete": "Incomplete",
     "checked_out": "Checked Out",
 }
+
+
+def _format_csv_time(value):
+    if not value:
+        return ""
+
+    parsed = parse_datetime(value) if isinstance(value, str) else value
+    if not parsed:
+        return ""
+
+    return timezone.localtime(parsed).strftime("%I:%M %p").lstrip("0")
 
 
 def _build_attendance_sheet_rows(*, filters):
@@ -457,8 +469,8 @@ class AdminAttendanceSheetExportCsvView(APIView):
                     row["faculty_name"],
                     row["email"],
                     row["session_name"],
-                    row["time_in"] or "",
-                    row["time_out"] or "",
+                    _format_csv_time(row["time_in"]),
+                    _format_csv_time(row["time_out"]),
                     row["attendance_status"],
                     row["signature_status"],
                 ]
