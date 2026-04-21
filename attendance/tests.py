@@ -321,6 +321,64 @@ class AttendanceApiTests(APITestCase):
         self.assertEqual(response.data["session"]["id"], session.id)
         self.assertIn("check_in_start_time", response.data["session"])
 
+    def test_preview_shows_check_out_after_existing_check_in(self):
+        now = timezone.now()
+        session = self._create_rule_session(
+            check_in_start_time=now - timedelta(minutes=30),
+            check_in_end_time=now + timedelta(minutes=30),
+            check_out_start_time=now - timedelta(minutes=15),
+            check_out_end_time=now + timedelta(hours=1),
+            late_threshold_time=now - timedelta(minutes=10),
+        )
+        AttendanceRecord.objects.create(
+            user=self.faculty_user,
+            session=session,
+            attendance_type=AttendanceRecord.AttendanceType.CHECK_IN,
+            is_late=False,
+        )
+
+        self._faculty_auth()
+        response = self.client.get("/api/attendance/session-preview", {"qr_token": session.qr_token})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["session"]["already_checked_in"])
+        self.assertFalse(response.data["session"]["already_checked_out"])
+        self.assertEqual(response.data["session"]["next_valid_action"], "check-out")
+        self.assertIn("may now check out", response.data["session"]["action_message"].lower())
+
+    def test_scan_without_type_resolves_to_check_out_after_check_in(self):
+        now = timezone.now()
+        session = self._create_rule_session(
+            check_in_start_time=now - timedelta(minutes=30),
+            check_in_end_time=now + timedelta(minutes=30),
+            check_out_start_time=now - timedelta(minutes=15),
+            check_out_end_time=now + timedelta(hours=1),
+            late_threshold_time=now - timedelta(minutes=10),
+        )
+        AttendanceRecord.objects.create(
+            user=self.faculty_user,
+            session=session,
+            attendance_type=AttendanceRecord.AttendanceType.CHECK_IN,
+            is_late=False,
+        )
+
+        self._faculty_auth()
+        response = self.client.post(
+            "/api/attendance/scan",
+            {"qr_token": session.qr_token},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["record"]["attendance_type"], "check-out")
+        self.assertTrue(
+            AttendanceRecord.objects.filter(
+                user=self.faculty_user,
+                session=session,
+                attendance_type=AttendanceRecord.AttendanceType.CHECK_OUT,
+            ).exists()
+        )
+
     def test_admin_qr_status_returns_current_rotating_token(self):
         session = self._create_rule_session(
             name="QR Status Session",

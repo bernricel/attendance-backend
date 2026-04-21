@@ -26,6 +26,14 @@ class ScanValidationResult:
     lifecycle_status: str = ""
 
 
+@dataclass
+class SessionActionState:
+    has_checked_in: bool
+    has_checked_out: bool
+    next_valid_action: str = ""
+    message: str = ""
+
+
 def ensure_session_lifecycle_state(session: AttendanceSession, *, reference_time=None):
     """
     Synchronize `is_active` with time-based lifecycle and return current status.
@@ -251,6 +259,93 @@ def get_session_by_qr_token(qr_token: str):
     return AttendanceSession.objects.filter(qr_token=qr_token).first()
 
 
+def _is_action_allowed_now(*, session, attendance_type: str, now):
+    if attendance_type == AttendanceRecord.AttendanceType.CHECK_IN:
+        enable_window = session.enable_check_in_window
+        window_start = session.check_in_start_time
+        window_end = session.check_in_end_time
+    else:
+        enable_window = session.enable_check_out_window
+        window_start = session.check_out_start_time
+        window_end = session.check_out_end_time
+
+    if not enable_window:
+        return True
+    if not window_start:
+        return False
+    if now < window_start:
+        return False
+    if window_end and now > window_end:
+        return False
+    return True
+
+
+def get_session_action_state(*, user, session, reference_time=None):
+    """
+    Return user-specific progress and next valid attendance action.
+    """
+    now = reference_time or timezone.now()
+    has_checked_in = AttendanceRecord.objects.filter(
+        user=user,
+        session=session,
+        attendance_type=AttendanceRecord.AttendanceType.CHECK_IN,
+    ).exists()
+    has_checked_out = AttendanceRecord.objects.filter(
+        user=user,
+        session=session,
+        attendance_type=AttendanceRecord.AttendanceType.CHECK_OUT,
+    ).exists()
+
+    can_check_in_now = _is_action_allowed_now(
+        session=session,
+        attendance_type=AttendanceRecord.AttendanceType.CHECK_IN,
+        now=now,
+    )
+    can_check_out_now = _is_action_allowed_now(
+        session=session,
+        attendance_type=AttendanceRecord.AttendanceType.CHECK_OUT,
+        now=now,
+    )
+
+    if has_checked_in and has_checked_out:
+        return SessionActionState(
+            has_checked_in=True,
+            has_checked_out=True,
+            next_valid_action="",
+            message="You have already completed attendance for this session.",
+        )
+
+    if has_checked_in:
+        if can_check_out_now:
+            return SessionActionState(
+                has_checked_in=True,
+                has_checked_out=False,
+                next_valid_action=AttendanceRecord.AttendanceType.CHECK_OUT,
+                message="You have already checked in. You may now check out.",
+            )
+        return SessionActionState(
+            has_checked_in=True,
+            has_checked_out=False,
+            next_valid_action="",
+            message="You have already checked in. Check-out is not available at this time.",
+        )
+
+    if can_check_in_now:
+        return SessionActionState(
+            has_checked_in=False,
+            has_checked_out=False,
+            next_valid_action=AttendanceRecord.AttendanceType.CHECK_IN,
+            message="",
+        )
+
+    return SessionActionState(
+        has_checked_in=False,
+        has_checked_out=False,
+        next_valid_action="",
+        message="Current time is outside the allowed check-in/check-out windows.",
+    )
+
+
 def validate_session_for_scan(*, user, session, attendance_type: str, scanned_qr_token: str):
     """
     Validate all scan rules before we create an attendance record.
@@ -300,26 +395,15 @@ def validate_session_for_scan(*, user, session, attendance_type: str, scanned_qr
         )
 
     # Step 3: Use server-side time (not client device time) to enforce fairness.
-    def _is_action_allowed(enable_window, window_start, window_end):
-        if not enable_window:
-            return True
-        if not window_start:
-            return False
-        if now < window_start:
-            return False
-        if window_end and now > window_end:
-            return False
-        return True
-
-    can_check_in_now = _is_action_allowed(
-        session.enable_check_in_window,
-        session.check_in_start_time,
-        session.check_in_end_time,
+    can_check_in_now = _is_action_allowed_now(
+        session=session,
+        attendance_type=AttendanceRecord.AttendanceType.CHECK_IN,
+        now=now,
     )
-    can_check_out_now = _is_action_allowed(
-        session.enable_check_out_window,
-        session.check_out_start_time,
-        session.check_out_end_time,
+    can_check_out_now = _is_action_allowed_now(
+        session=session,
+        attendance_type=AttendanceRecord.AttendanceType.CHECK_OUT,
+        now=now,
     )
 
     requested_type = attendance_type or ""
@@ -327,19 +411,19 @@ def validate_session_for_scan(*, user, session, attendance_type: str, scanned_qr
         AttendanceRecord.AttendanceType.CHECK_IN,
         AttendanceRecord.AttendanceType.CHECK_OUT,
     }:
-        # If client does not send a type, infer it from active rule window.
-        if can_check_in_now and not can_check_out_now:
-            requested_type = AttendanceRecord.AttendanceType.CHECK_IN
-        elif can_check_out_now and not can_check_in_now:
-            requested_type = AttendanceRecord.AttendanceType.CHECK_OUT
-        elif can_check_in_now and can_check_out_now:
-            # Deterministic tie-breaker for overlapping windows.
-            requested_type = AttendanceRecord.AttendanceType.CHECK_IN
+        # If type is omitted, infer from existing attendance progress first.
+        action_state = get_session_action_state(
+            user=user,
+            session=session,
+            reference_time=now,
+        )
+        if action_state.next_valid_action:
+            requested_type = action_state.next_valid_action
         else:
             return ScanValidationResult(
                 is_valid=False,
-                message="Current time is outside the allowed check-in/check-out windows.",
-                http_status=400,
+                message=action_state.message or "Current time is outside the allowed check-in/check-out windows.",
+                http_status=409 if action_state.has_checked_in and action_state.has_checked_out else 400,
                 lifecycle_status=lifecycle_status,
             )
 

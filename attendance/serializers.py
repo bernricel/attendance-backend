@@ -6,6 +6,7 @@ from django.utils import timezone
 from rest_framework import serializers
 
 from .models import AttendanceRecord, AttendanceSchedule, AttendanceSession
+from .services import get_session_action_state
 
 
 class AttendanceSessionSerializer(serializers.ModelSerializer):
@@ -400,6 +401,11 @@ class FacultySessionPreviewSerializer(serializers.ModelSerializer):
     qr_refresh_interval_seconds = serializers.IntegerField(read_only=True)
     lifecycle_status = serializers.SerializerMethodField()
     can_accept_attendance = serializers.SerializerMethodField()
+    already_checked_in = serializers.SerializerMethodField()
+    already_checked_out = serializers.SerializerMethodField()
+    next_valid_action = serializers.SerializerMethodField()
+    attendance_completed = serializers.SerializerMethodField()
+    action_message = serializers.SerializerMethodField()
 
     class Meta:
         model = AttendanceSession
@@ -421,6 +427,11 @@ class FacultySessionPreviewSerializer(serializers.ModelSerializer):
             "is_active",
             "lifecycle_status",
             "can_accept_attendance",
+            "already_checked_in",
+            "already_checked_out",
+            "next_valid_action",
+            "attendance_completed",
+            "action_message",
             "qr_token",
             "qr_refresh_interval_seconds",
         )
@@ -430,6 +441,42 @@ class FacultySessionPreviewSerializer(serializers.ModelSerializer):
 
     def get_can_accept_attendance(self, obj):
         return obj.is_accepting_attendance()
+
+    def _get_action_state(self, obj):
+        if not hasattr(self, "_action_state_cache"):
+            self._action_state_cache = {}
+        if obj.id in self._action_state_cache:
+            return self._action_state_cache[obj.id]
+
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        if not user or not user.is_authenticated:
+            return None
+        action_state = get_session_action_state(user=user, session=obj)
+        self._action_state_cache[obj.id] = action_state
+        return action_state
+
+    def get_already_checked_in(self, obj):
+        action_state = self._get_action_state(obj)
+        return bool(action_state and action_state.has_checked_in)
+
+    def get_already_checked_out(self, obj):
+        action_state = self._get_action_state(obj)
+        return bool(action_state and action_state.has_checked_out)
+
+    def get_next_valid_action(self, obj):
+        action_state = self._get_action_state(obj)
+        return action_state.next_valid_action if action_state else ""
+
+    def get_attendance_completed(self, obj):
+        action_state = self._get_action_state(obj)
+        if not action_state:
+            return False
+        return action_state.has_checked_in and action_state.has_checked_out
+
+    def get_action_message(self, obj):
+        action_state = self._get_action_state(obj)
+        return action_state.message if action_state else ""
 
 
 class AttendanceByDateQuerySerializer(serializers.Serializer):

@@ -63,7 +63,7 @@ class FacultySessionPreviewView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        serializer = FacultySessionPreviewSerializer(session)
+        serializer = FacultySessionPreviewSerializer(session, context={"request": request})
         return Response(
             {"success": True, "session": serializer.data},
             status=status.HTTP_200_OK,
