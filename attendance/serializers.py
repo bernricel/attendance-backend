@@ -14,6 +14,12 @@ class AttendanceSessionSerializer(serializers.ModelSerializer):
     qr_token_expires_at = serializers.SerializerMethodField()
     lifecycle_status = serializers.SerializerMethodField()
     can_accept_attendance = serializers.SerializerMethodField()
+    check_in_start_time = serializers.DateTimeField(required=False, allow_null=True)
+    check_in_end_time = serializers.DateTimeField(required=False, allow_null=True)
+    late_threshold_time = serializers.DateTimeField(required=False, allow_null=True)
+    check_out_start_time = serializers.DateTimeField(required=False, allow_null=True)
+    check_out_end_time = serializers.DateTimeField(required=False, allow_null=True)
+    session_end_time = serializers.DateTimeField(required=False, allow_null=True)
 
     class Meta:
         model = AttendanceSession
@@ -177,6 +183,7 @@ class CreateSessionSerializer(serializers.Serializer):
         else:
             attrs["check_in_start_time"] = None
             attrs["check_in_end_time"] = None
+            attrs["late_threshold_time"] = None
 
         if attrs["enable_check_out_window"]:
             if not attrs.get("check_out_start_time"):
