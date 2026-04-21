@@ -492,6 +492,31 @@ class AdminFacultyAttendanceQuerySerializer(serializers.Serializer):
     faculty_id = serializers.IntegerField(required=False, min_value=1)
 
 
+class AdminAttendanceSheetQuerySerializer(serializers.Serializer):
+    session_id = serializers.IntegerField(required=False, min_value=1)
+    date = serializers.DateField(required=False)
+    faculty_id = serializers.IntegerField(required=False, min_value=1)
+    attendance_status = serializers.ChoiceField(
+        required=False,
+        choices=["on_time", "late", "incomplete", "checked_out"],
+    )
+    signature_status = serializers.ChoiceField(
+        required=False,
+        choices=["valid", "invalid", "partial"],
+    )
+    sort_by = serializers.ChoiceField(
+        required=False,
+        default="faculty_name",
+        choices=["faculty_name", "time_in", "time_out", "attendance_status", "signature_status"],
+    )
+    sort_order = serializers.ChoiceField(required=False, default="asc", choices=["asc", "desc"])
+
+    def validate_date(self, value: date):
+        if value > timezone.localdate():
+            raise serializers.ValidationError("Date cannot be in the future.")
+        return value
+
+
 class AdminSessionDeleteSerializer(serializers.Serializer):
     password = serializers.CharField(required=True, allow_blank=False, trim_whitespace=False)
 
