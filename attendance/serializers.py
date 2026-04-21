@@ -502,12 +502,12 @@ class AdminAttendanceSheetQuerySerializer(serializers.Serializer):
     )
     signature_status = serializers.ChoiceField(
         required=False,
-        choices=["valid", "invalid", "partial"],
+        choices=["valid", "invalid"],
     )
     sort_by = serializers.ChoiceField(
         required=False,
-        default="faculty_name",
-        choices=["faculty_name", "time_in", "time_out", "attendance_status", "signature_status"],
+        default="time_in",
+        choices=["time_in", "time_out", "attendance_status", "signature_status", "session"],
     )
     sort_order = serializers.ChoiceField(required=False, default="asc", choices=["asc", "desc"])
 
@@ -522,6 +522,8 @@ class AdminSessionDeleteSerializer(serializers.Serializer):
 
 
 def get_session_queryset_with_counts():
-    return AttendanceSession.objects.select_related("created_by").annotate(
-        attendance_count=Count("attendance_records")
+    return (
+        AttendanceSession.objects.select_related("created_by")
+        .annotate(attendance_count=Count("attendance_records"))
+        .order_by("-created_at", "-id")
     )

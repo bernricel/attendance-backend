@@ -47,7 +47,7 @@ def _build_attendance_sheet_rows(*, filters):
     faculty_id = filters.get("faculty_id")
     attendance_status_filter = filters.get("attendance_status")
     signature_status_filter = filters.get("signature_status")
-    sort_by = filters.get("sort_by", "faculty_name")
+    sort_by = filters.get("sort_by", "time_in")
     sort_order = filters.get("sort_order", "asc")
 
     if session_id:
@@ -74,7 +74,7 @@ def _build_attendance_sheet_rows(*, filters):
                 "time_in": None,
                 "time_out": None,
                 "attendance_status": ATTENDANCE_STATUS_LABELS["incomplete"],
-                "signature_status": "partial",
+                "signature_status": "invalid",
                 "_check_in_is_late": False,
                 "_check_in_signature_valid": None,
                 "_check_out_signature_valid": None,
@@ -108,11 +108,11 @@ def _build_attendance_sheet_rows(*, filters):
         signature_values = [row["_check_in_signature_valid"], row["_check_out_signature_valid"]]
         present_signatures = [value for value in signature_values if value is not None]
         if present_signatures and all(present_signatures):
-            row["signature_status"] = "valid" if has_check_in and has_check_out else "partial"
+            row["signature_status"] = "valid"
         elif any(value is False for value in signature_values):
             row["signature_status"] = "invalid"
         else:
-            row["signature_status"] = "partial"
+            row["signature_status"] = "invalid"
 
         row["time_in"] = row["time_in"].isoformat() if row["time_in"] else None
         row["time_out"] = row["time_out"].isoformat() if row["time_out"] else None
@@ -129,7 +129,7 @@ def _build_attendance_sheet_rows(*, filters):
         ATTENDANCE_STATUS_LABELS["checked_out"]: 2,
         ATTENDANCE_STATUS_LABELS["incomplete"]: 3,
     }
-    signature_status_rank = {"valid": 0, "partial": 1, "invalid": 2}
+    signature_status_rank = {"valid": 0, "invalid": 1}
 
     def _sort_key(item):
         if sort_by == "time_in":
@@ -140,7 +140,13 @@ def _build_attendance_sheet_rows(*, filters):
             return attendance_status_rank.get(item["attendance_status"], 99)
         if sort_by == "signature_status":
             return signature_status_rank.get(item["signature_status"], 99)
-        return item["faculty_name"].lower()
+        if sort_by == "session":
+            return (
+                item["session_start_time"] is None,
+                item["session_start_time"] or "",
+                item["session_name"].lower(),
+            )
+        return (item["time_in"] is None, item["time_in"] or "")
 
     rows = sorted(rows, key=_sort_key, reverse=sort_order == "desc")
     return rows
@@ -429,8 +435,9 @@ class AdminAttendanceSheetExportCsvView(APIView):
             filename_parts.append(filters["date"].isoformat())
         filename = "_".join(filename_parts) + ".csv"
 
-        response = HttpResponse(content_type="text/csv")
+        response = HttpResponse(content_type="text/csv; charset=utf-8")
         response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        response.write("\ufeff")
 
         writer = csv.writer(response)
         writer.writerow(
@@ -438,7 +445,6 @@ class AdminAttendanceSheetExportCsvView(APIView):
                 "Faculty Name",
                 "Email",
                 "Session",
-                "Date",
                 "Time In",
                 "Time Out",
                 "Attendance Status",
@@ -451,7 +457,6 @@ class AdminAttendanceSheetExportCsvView(APIView):
                     row["faculty_name"],
                     row["email"],
                     row["session_name"],
-                    row["date"],
                     row["time_in"] or "",
                     row["time_out"] or "",
                     row["attendance_status"],
