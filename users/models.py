@@ -60,6 +60,13 @@ class User(AbstractUser):
     first_name = models.CharField(max_length=150, blank=False, default="")
     last_name = models.CharField(max_length=150, blank=False, default="")
     school_id = models.CharField(max_length=50, blank=True)
+    department = models.ForeignKey(
+        "attendance.Department",
+        on_delete=models.PROTECT,
+        related_name="users",
+        null=True,
+        blank=True,
+    )
     role = models.CharField(max_length=20, choices=Role.choices, default=Role.FACULTY)
     is_profile_complete = models.BooleanField(default=False)
 
@@ -73,11 +80,13 @@ class User(AbstractUser):
         Recalculate profile completion status from required profile fields.
         Useful when profile fields are updated outside the standard serializer flow.
         """
+        department_ready = self.role != self.Role.FACULTY or self.department_id is not None
         self.is_profile_complete = all(
             [
                 self.first_name.strip(),
                 self.last_name.strip(),
                 self.school_id.strip(),
+                department_ready,
             ]
         )
         if save:
@@ -88,11 +97,13 @@ class User(AbstractUser):
         self.email = self.email.lower()
         if self.login_username:
             self.login_username = self.login_username.strip().lower()
+        department_ready = self.role != self.Role.FACULTY or self.department_id is not None
         self.is_profile_complete = all(
             [
                 self.first_name.strip(),
                 self.last_name.strip(),
                 self.school_id.strip(),
+                department_ready,
             ]
         )
         super().save(*args, **kwargs)

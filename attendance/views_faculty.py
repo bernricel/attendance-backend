@@ -79,7 +79,7 @@ class FacultyAttendanceHistoryView(APIView):
     def get(self, request):
         # Utility endpoint for faculty history page (not QR generation, but related flow feedback).
         records = (
-            AttendanceRecord.objects.select_related("user", "session")
+            AttendanceRecord.objects.select_related("user", "session", "session__department")
             .filter(user=request.user)
             .order_by("-check_time")
         )

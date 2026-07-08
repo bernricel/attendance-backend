@@ -1,9 +1,13 @@
 from rest_framework import serializers
 
+from attendance.models import Department
 from .models import User
 
 
 class UserSerializer(serializers.ModelSerializer):
+    department = serializers.SerializerMethodField()
+    department_id = serializers.IntegerField(read_only=True)
+
     class Meta:
         model = User
         fields = (
@@ -13,9 +17,14 @@ class UserSerializer(serializers.ModelSerializer):
             "first_name",
             "last_name",
             "school_id",
+            "department",
+            "department_id",
             "role",
             "is_profile_complete",
         )
+
+    def get_department(self, obj):
+        return obj.department.name if obj.department else ""
 
 
 class GoogleLoginSerializer(serializers.Serializer):
@@ -38,10 +47,20 @@ class CompleteProfileSerializer(serializers.ModelSerializer):
     first_name = serializers.CharField(required=True, allow_blank=False, max_length=150)
     last_name = serializers.CharField(required=True, allow_blank=False, max_length=150)
     school_id = serializers.CharField(required=True, allow_blank=False, max_length=50)
+    department_id = serializers.IntegerField(required=True, allow_null=False, min_value=1)
 
     class Meta:
         model = User
-        fields = ("first_name", "last_name", "school_id")
+        fields = ("first_name", "last_name", "school_id", "department_id")
+
+    def validate_department_id(self, value):
+        if not Department.objects.filter(id=value, is_active=True).exists():
+            raise serializers.ValidationError("Selected department is invalid or inactive.")
+        return value
+
+    def update(self, instance, validated_data):
+        instance.department_id = validated_data.pop("department_id")
+        return super().update(instance, validated_data)
 
 
 class AdminLoginSerializer(serializers.Serializer):

@@ -12,6 +12,19 @@ SESSION_TYPE_CHOICES = (
 )
 
 
+class Department(models.Model):
+    name = models.CharField(max_length=150, unique=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("name",)
+
+    def __str__(self):
+        return self.name
+
+
 class AttendanceSchedule(models.Model):
     class RecurrencePattern(models.TextChoices):
         WEEKDAYS = "weekdays", "Monday to Friday"
@@ -22,7 +35,13 @@ class AttendanceSchedule(models.Model):
     name = models.CharField(max_length=255)
     # Legacy field retained for backwards compatibility with existing dashboards.
     session_type = models.CharField(max_length=20, choices=SESSION_TYPE_CHOICES, default="mixed")
-    department = models.CharField(max_length=150, blank=True, default="")
+    department = models.ForeignKey(
+        "Department",
+        on_delete=models.PROTECT,
+        related_name="schedules",
+        null=True,
+        blank=True,
+    )
     # Scheduled session span for the class/workday.
     start_time = models.TimeField()
     end_time = models.TimeField()
@@ -67,7 +86,13 @@ class AttendanceSession(models.Model):
     name = models.CharField(max_length=255)
     # Mixed sessions expose both check-in and check-out windows in one occurrence.
     session_type = models.CharField(max_length=20, choices=SessionType.choices, default=SessionType.MIXED)
-    department = models.CharField(max_length=150, blank=True, default="")
+    department = models.ForeignKey(
+        "Department",
+        on_delete=models.PROTECT,
+        related_name="sessions",
+        null=True,
+        blank=True,
+    )
     # Scheduled session span.
     start_time = models.DateTimeField()
     end_time = models.DateTimeField()

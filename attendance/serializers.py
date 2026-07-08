@@ -1,12 +1,26 @@
 from datetime import date, datetime, time
 
-from django.conf import settings
 from django.db.models import Count
 from django.utils import timezone
 from rest_framework import serializers
 
-from .models import AttendanceRecord, AttendanceSchedule, AttendanceSession
+from .models import AttendanceRecord, AttendanceSchedule, AttendanceSession, Department
 from .services import get_session_action_state
+
+
+class DepartmentSerializer(serializers.ModelSerializer):
+    user_count = serializers.IntegerField(read_only=True)
+    session_count = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = Department
+        fields = ("id", "name", "is_active", "user_count", "session_count", "created_at", "updated_at")
+
+
+class DepartmentWriteSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Department
+        fields = ("name", "is_active")
 
 
 class AttendanceSessionSerializer(serializers.ModelSerializer):
@@ -15,6 +29,8 @@ class AttendanceSessionSerializer(serializers.ModelSerializer):
     qr_token_expires_at = serializers.SerializerMethodField()
     lifecycle_status = serializers.SerializerMethodField()
     can_accept_attendance = serializers.SerializerMethodField()
+    department = serializers.SerializerMethodField()
+    department_id = serializers.IntegerField(read_only=True)
     check_in_start_time = serializers.DateTimeField(required=False, allow_null=True)
     check_in_end_time = serializers.DateTimeField(required=False, allow_null=True)
     late_threshold_time = serializers.DateTimeField(required=False, allow_null=True)
@@ -28,6 +44,7 @@ class AttendanceSessionSerializer(serializers.ModelSerializer):
             "id",
             "name",
             "department",
+            "department_id",
             "session_type",
             "start_time",
             "end_time",
@@ -67,6 +84,9 @@ class AttendanceSessionSerializer(serializers.ModelSerializer):
     def get_can_accept_attendance(self, obj):
         return obj.is_accepting_attendance()
 
+    def get_department(self, obj):
+        return obj.department.name if obj.department else "All Departments"
+
 
 class CreateSessionSerializer(serializers.Serializer):
     """
@@ -80,7 +100,7 @@ class CreateSessionSerializer(serializers.Serializer):
     title = serializers.CharField(max_length=255, required=False, allow_blank=False)
     # Backward-compatible alias so existing clients are not immediately broken.
     name = serializers.CharField(max_length=255, required=False, allow_blank=False)
-    department = serializers.CharField(max_length=150, required=False, allow_blank=True, default="")
+    department_id = serializers.IntegerField(required=False, allow_null=True, min_value=1)
     is_active = serializers.BooleanField(required=False, default=True)
     qr_refresh_interval_seconds = serializers.IntegerField(required=False, min_value=1, default=30)
 
@@ -131,8 +151,14 @@ class CreateSessionSerializer(serializers.Serializer):
         if not title:
             raise serializers.ValidationError("title is required.")
         attrs["name"] = title
-        # CIT-only scope: department is system-defined, not selected in current UI.
-        attrs["department"] = (getattr(settings, "DEFAULT_ATTENDANCE_DEPARTMENT", "CIT") or "CIT").strip()
+        department_id = attrs.get("department_id")
+        if department_id:
+            try:
+                attrs["department"] = Department.objects.get(id=department_id, is_active=True)
+            except Department.DoesNotExist:
+                raise serializers.ValidationError("Selected department is invalid or inactive.")
+        else:
+            attrs["department"] = None
 
         is_recurring = attrs.get("is_recurring", False)
         has_explicit_check_in_toggle = "enable_check_in_window" in self.initial_data
@@ -266,6 +292,8 @@ class AttendanceScheduleSerializer(serializers.ModelSerializer):
     generated_session_count = serializers.SerializerMethodField()
     created_by_email = serializers.EmailField(source="created_by.email", read_only=True)
     custom_weekdays = serializers.SerializerMethodField()
+    department = serializers.SerializerMethodField()
+    department_id = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = AttendanceSchedule
@@ -273,6 +301,7 @@ class AttendanceScheduleSerializer(serializers.ModelSerializer):
             "id",
             "name",
             "department",
+            "department_id",
             "session_type",
             "start_time",
             "end_time",
@@ -298,6 +327,9 @@ class AttendanceScheduleSerializer(serializers.ModelSerializer):
         if not obj.custom_weekdays:
             return []
         return [int(value) for value in obj.custom_weekdays.split(",") if value != ""]
+
+    def get_department(self, obj):
+        return obj.department.name if obj.department else "All Departments"
 
 
 class CreateScheduleSerializer(serializers.ModelSerializer):
@@ -401,6 +433,8 @@ class FacultySessionPreviewSerializer(serializers.ModelSerializer):
     qr_refresh_interval_seconds = serializers.IntegerField(read_only=True)
     lifecycle_status = serializers.SerializerMethodField()
     can_accept_attendance = serializers.SerializerMethodField()
+    department = serializers.SerializerMethodField()
+    department_id = serializers.IntegerField(read_only=True)
     already_checked_in = serializers.SerializerMethodField()
     already_checked_out = serializers.SerializerMethodField()
     next_valid_action = serializers.SerializerMethodField()
@@ -413,6 +447,7 @@ class FacultySessionPreviewSerializer(serializers.ModelSerializer):
             "id",
             "name",
             "department",
+            "department_id",
             "session_type",
             "start_time",
             "end_time",
@@ -441,6 +476,9 @@ class FacultySessionPreviewSerializer(serializers.ModelSerializer):
 
     def get_can_accept_attendance(self, obj):
         return obj.is_accepting_attendance()
+
+    def get_department(self, obj):
+        return obj.department.name if obj.department else "All Departments"
 
     def _get_action_state(self, obj):
         if not hasattr(self, "_action_state_cache"):
@@ -492,6 +530,18 @@ class AdminFacultyAttendanceQuerySerializer(serializers.Serializer):
     faculty_id = serializers.IntegerField(required=False, min_value=1)
 
 
+class AdminSessionListQuerySerializer(serializers.Serializer):
+    search = serializers.CharField(required=False, allow_blank=True, default="")
+    date = serializers.DateField(required=False)
+    page = serializers.IntegerField(required=False, min_value=1, default=1)
+    page_size = serializers.IntegerField(required=False, min_value=1, default=12)
+
+    def validate_date(self, value: date):
+        if value > timezone.localdate():
+            raise serializers.ValidationError("Date cannot be in the future.")
+        return value
+
+
 class AdminAttendanceSheetQuerySerializer(serializers.Serializer):
     session_id = serializers.IntegerField(required=False, min_value=1)
     date = serializers.DateField(required=False)
@@ -523,7 +573,7 @@ class AdminSessionDeleteSerializer(serializers.Serializer):
 
 def get_session_queryset_with_counts():
     return (
-        AttendanceSession.objects.select_related("created_by")
+        AttendanceSession.objects.select_related("created_by", "department")
         .annotate(attendance_count=Count("attendance_records"))
         .order_by("-created_at", "-id")
     )

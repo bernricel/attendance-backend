@@ -1,26 +1,31 @@
 from datetime import time
 import csv
 
+from django.core.paginator import Paginator
 from django.http import HttpResponse
 from django.utils.dateparse import parse_datetime
 from django.utils import timezone
 from django.db import transaction
+from django.db.models import Count
 from rest_framework.exceptions import ValidationError
 from rest_framework import permissions, status
 from rest_framework.authentication import TokenAuthentication
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import AttendanceRecord, AttendanceSchedule, AttendanceSession
+from .models import AttendanceRecord, AttendanceSchedule, AttendanceSession, Department
 from .permissions import IsAdminRole
 from .serializers import (
     AdminFacultyAttendanceQuerySerializer,
     AdminAttendanceSheetQuerySerializer,
     AdminSessionDeleteSerializer,
+    AdminSessionListQuerySerializer,
     AttendanceByDateQuerySerializer,
     AttendanceRecordSerializer,
     AttendanceSessionSerializer,
     CreateSessionSerializer,
+    DepartmentSerializer,
+    DepartmentWriteSerializer,
     VerifySignatureSerializer,
     get_session_queryset_with_counts,
 )
@@ -53,7 +58,7 @@ def _format_csv_time(value):
 
 
 def _build_attendance_sheet_rows(*, filters):
-    records = AttendanceRecord.objects.select_related("user", "session").all()
+    records = AttendanceRecord.objects.select_related("user", "session", "session__department").all()
     session_id = filters.get("session_id")
     target_date = filters.get("date")
     faculty_id = filters.get("faculty_id")
@@ -78,6 +83,7 @@ def _build_attendance_sheet_rows(*, filters):
             row = {
                 "session_id": record.session_id,
                 "session_name": record.session.name,
+                "department": record.session.department.name if record.session.department else "All Departments",
                 "session_start_time": record.session.start_time,
                 "date": timezone.localtime(record.session.start_time).date().isoformat(),
                 "faculty_id": record.user_id,
@@ -277,13 +283,101 @@ class AdminSessionListView(APIView):
     permission_classes = [permissions.IsAuthenticated, IsAdminRole]
 
     def get(self, request):
-        # Frontend uses this to populate session pickers and QR display pages.
-        sessions = list(get_session_queryset_with_counts())
+        query_serializer = AdminSessionListQuerySerializer(data=request.query_params)
+        query_serializer.is_valid(raise_exception=True)
+        filters = query_serializer.validated_data
+
+        sessions = get_session_queryset_with_counts()
+        search = filters.get("search", "").strip()
+        target_date = filters.get("date")
+        page_number = filters.get("page", 1)
+        page_size = filters.get("page_size", 12)
+
+        if search:
+            sessions = sessions.filter(name__icontains=search)
+        if target_date:
+            sessions = sessions.filter(start_time__date=target_date)
+
         # Keep persisted is_active aligned with lifecycle whenever admin lists sessions.
-        for session in sessions:
+        paginator = Paginator(sessions, page_size)
+        page_obj = paginator.get_page(page_number)
+        session_items = list(page_obj.object_list)
+
+        for session in session_items:
             ensure_session_lifecycle_state(session)
-        data = AttendanceSessionSerializer(sessions, many=True).data
-        return Response({"success": True, "sessions": data}, status=status.HTTP_200_OK)
+        data = AttendanceSessionSerializer(session_items, many=True).data
+        return Response(
+            {
+                "success": True,
+                "sessions": data,
+                "pagination": {
+                    "page": page_obj.number,
+                    "page_size": page_size,
+                    "total_pages": paginator.num_pages,
+                    "total_sessions": paginator.count,
+                    "has_previous": page_obj.has_previous(),
+                    "has_next": page_obj.has_next(),
+                    "start_index": page_obj.start_index() if paginator.count else 0,
+                    "end_index": page_obj.end_index() if paginator.count else 0,
+                },
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class AdminDepartmentListCreateView(APIView):
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [permissions.IsAuthenticated, IsAdminRole]
+
+    def get(self, request):
+        search = (request.query_params.get("search") or "").strip()
+        active_only = request.query_params.get("active_only") == "1"
+
+        departments = Department.objects.annotate(
+            user_count=Count("users", distinct=True),
+            session_count=Count("sessions", distinct=True),
+        ).order_by("name")
+
+        if active_only:
+            departments = departments.filter(is_active=True)
+        if search:
+            departments = departments.filter(name__icontains=search)
+
+        return Response(
+            {"success": True, "departments": DepartmentSerializer(departments, many=True).data},
+            status=status.HTTP_200_OK,
+        )
+
+    def post(self, request):
+        serializer = DepartmentWriteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        department = serializer.save()
+        return Response(
+            {"success": True, "department": DepartmentSerializer(department).data},
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class AdminDepartmentDetailView(APIView):
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [permissions.IsAuthenticated, IsAdminRole]
+
+    def patch(self, request, department_id):
+        try:
+            department = Department.objects.get(id=department_id)
+        except Department.DoesNotExist:
+            return Response(
+                {"success": False, "message": "Department not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        serializer = DepartmentWriteSerializer(instance=department, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        department = serializer.save()
+        return Response(
+            {"success": True, "department": DepartmentSerializer(department).data},
+            status=status.HTTP_200_OK,
+        )
 
 
 class AttendanceByDateView(APIView):
@@ -358,7 +452,7 @@ class FacultyAttendanceRecordsView(APIView):
             )
 
         records = (
-            AttendanceRecord.objects.select_related("session")
+            AttendanceRecord.objects.select_related("session", "session__department")
             .filter(user=faculty)
             .order_by("-check_time")
         )
@@ -370,7 +464,7 @@ class FacultyAttendanceRecordsView(APIView):
                 grouped_records[key] = {
                     "session_id": record.session_id,
                     "session_name": record.session.name,
-                    "department": record.session.department,
+                    "department": record.session.department.name if record.session.department else "All Departments",
                     "date": timezone.localtime(record.check_time).date().isoformat(),
                     "check_in_time": None,
                     "check_out_time": None,

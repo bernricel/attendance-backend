@@ -3,6 +3,8 @@ from django.urls import path
 from .views_admin import (
     AdminAttendanceSheetExportCsvView,
     AdminAttendanceSheetView,
+    AdminDepartmentDetailView,
+    AdminDepartmentListCreateView,
     AttendanceByDateView,
     AdminSessionListView,
     CreateSessionView,
@@ -15,6 +17,8 @@ from .views_admin import (
 
 urlpatterns = [
     path("create-session", CreateSessionView.as_view(), name="admin-create-session"),
+    path("departments", AdminDepartmentListCreateView.as_view(), name="admin-departments"),
+    path("departments/<int:department_id>", AdminDepartmentDetailView.as_view(), name="admin-department-detail"),
     # Frontend session lists and selectors use this endpoint.
     path("sessions", AdminSessionListView.as_view(), name="admin-sessions"),
     path("sessions/<int:session_id>", DeleteSessionView.as_view(), name="admin-delete-session"),

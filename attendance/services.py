@@ -350,10 +350,6 @@ def validate_session_for_scan(*, user, session, attendance_type: str, scanned_qr
     """
     Validate all scan rules before we create an attendance record.
 
-    CIT-only design note:
-    The system no longer partitions users by department, so no department
-    membership validation is performed here.
-
     This function is intentionally ordered like a checklist for presentation:
     1) session exists
     2) session is active
@@ -391,6 +387,14 @@ def validate_session_for_scan(*, user, session, attendance_type: str, scanned_qr
             is_valid=False,
             message="This session is no longer active.",
             http_status=400,
+            lifecycle_status=lifecycle_status,
+        )
+
+    if session.department_id is not None and user.department_id != session.department_id:
+        return ScanValidationResult(
+            is_valid=False,
+            message=f"This session is only available to the {session.department.name} department.",
+            http_status=403,
             lifecycle_status=lifecycle_status,
         )
 

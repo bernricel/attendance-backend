@@ -6,6 +6,7 @@ from rest_framework.authtoken.models import Token
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from attendance.models import Department
 from .google_auth import GoogleAuthError, verify_google_id_token
 from .models import User
 from .serializers import AdminLoginSerializer, CompleteProfileSerializer, GoogleLoginSerializer, UserSerializer
@@ -150,6 +151,18 @@ class CompleteProfileView(APIView):
                 "requires_profile_completion": not request.user.is_profile_complete,
                 "user": user_data,
             },
+            status=status.HTTP_200_OK,
+        )
+
+
+class ActiveDepartmentListView(APIView):
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        departments = list(Department.objects.filter(is_active=True).order_by("name").values("id", "name"))
+        return Response(
+            {"success": True, "departments": departments},
             status=status.HTTP_200_OK,
         )
 
