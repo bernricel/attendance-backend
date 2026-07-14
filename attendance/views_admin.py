@@ -62,6 +62,102 @@ def _format_csv_time(value):
     return timezone.localtime(parsed).strftime("%I:%M %p").lstrip("0")
 
 
+def _pdf_escape(value):
+    text = str(value or "")
+    return (
+        text.replace("\\", "\\\\")
+        .replace("(", "\\(")
+        .replace(")", "\\)")
+        .encode("latin-1", "replace")
+        .decode("latin-1")
+    )
+
+
+def _truncate_pdf_text(value, max_length):
+    text = str(value or "")
+    return text if len(text) <= max_length else f"{text[: max_length - 1]}..."
+
+
+def _build_simple_pdf(title, rows):
+    line_height = 14
+    page_width = 842
+    page_height = 595
+    margin_x = 32
+    start_y = 548
+    max_lines_per_page = 34
+
+    lines = [title, f"Generated: {timezone.localtime(timezone.now()).strftime('%Y-%m-%d %I:%M %p')}", ""]
+    lines.append("Faculty | Email | Session | Time In | Time Out | Attendance | Signature")
+    lines.append("-" * 132)
+    if rows:
+        for row in rows:
+            lines.append(
+                " | ".join(
+                    [
+                        _truncate_pdf_text(row.get("faculty_name"), 20),
+                        _truncate_pdf_text(row.get("email"), 24),
+                        _truncate_pdf_text(row.get("session_name"), 24),
+                        _format_csv_time(row.get("time_in")) or "-",
+                        _format_csv_time(row.get("time_out")) or "-",
+                        _truncate_pdf_text(row.get("attendance_status"), 14),
+                        _truncate_pdf_text(row.get("signature_status"), 10),
+                    ]
+                )
+            )
+    else:
+        lines.append("No attendance records match the selected filters.")
+
+    page_chunks = [lines[index : index + max_lines_per_page] for index in range(0, len(lines), max_lines_per_page)]
+    objects = []
+
+    def add_object(content):
+        objects.append(content)
+        return len(objects)
+
+    catalog_id = add_object("<< /Type /Catalog /Pages 2 0 R >>")
+    pages_id = add_object("")
+    font_id = add_object("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    page_ids = []
+
+    for page_number, chunk in enumerate(page_chunks, start=1):
+        stream_lines = [
+            "BT",
+            f"/F1 9 Tf",
+            f"{margin_x} {start_y} Td",
+            f"({ _pdf_escape(f'Page {page_number} of {len(page_chunks)}') }) Tj",
+            f"0 -{line_height} Td",
+        ]
+        for line in chunk:
+            stream_lines.append(f"({_pdf_escape(line)}) Tj")
+            stream_lines.append(f"0 -{line_height} Td")
+        stream_lines.append("ET")
+        stream = "\n".join(stream_lines).encode("latin-1", "replace")
+        content_id = add_object(f"<< /Length {len(stream)} >>\nstream\n{stream.decode('latin-1')}\nendstream")
+        page_id = add_object(
+            f"<< /Type /Page /Parent {pages_id} 0 R /MediaBox [0 0 {page_width} {page_height}] "
+            f"/Resources << /Font << /F1 {font_id} 0 R >> >> /Contents {content_id} 0 R >>"
+        )
+        page_ids.append(page_id)
+
+    objects[pages_id - 1] = f"<< /Type /Pages /Kids [{' '.join(f'{page_id} 0 R' for page_id in page_ids)}] /Count {len(page_ids)} >>"
+
+    output = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for object_id, content in enumerate(objects, start=1):
+        offsets.append(len(output))
+        output.extend(f"{object_id} 0 obj\n{content}\nendobj\n".encode("latin-1", "replace"))
+
+    xref_offset = len(output)
+    output.extend(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
+    output.extend(b"0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        output.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
+    output.extend(
+        f"trailer\n<< /Size {len(objects) + 1} /Root {catalog_id} 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n".encode("ascii")
+    )
+    return bytes(output)
+
+
 def _build_attendance_sheet_rows(*, filters):
     records = AttendanceRecord.objects.select_related(
         "user",
@@ -788,6 +884,31 @@ class AdminAttendanceSheetExportCsvView(APIView):
                     row["signature_status"],
                 ]
             )
+        return response
+
+
+class AdminAttendanceSheetExportPdfView(APIView):
+    """Export filtered attendance-sheet rows as a PDF."""
+
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [permissions.IsAuthenticated, IsAdminRole]
+
+    def get(self, request):
+        query_serializer = AdminAttendanceSheetQuerySerializer(data=request.query_params)
+        query_serializer.is_valid(raise_exception=True)
+        filters = query_serializer.validated_data
+        rows = _build_attendance_sheet_rows(filters=filters)
+
+        filename_parts = ["attendance_sheet"]
+        if filters.get("session_id"):
+            filename_parts.append(f"session_{filters['session_id']}")
+        if filters.get("date"):
+            filename_parts.append(filters["date"].isoformat())
+        filename = "_".join(filename_parts) + ".pdf"
+
+        pdf_bytes = _build_simple_pdf("Sync In Attendance Sheet", rows)
+        response = HttpResponse(pdf_bytes, content_type="application/pdf")
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
         return response
 
 

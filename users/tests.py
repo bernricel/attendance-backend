@@ -1,8 +1,43 @@
+from unittest.mock import patch
+
+from django.test import override_settings
 from rest_framework import status
 from rest_framework.test import APITestCase
 
 from attendance.models import Department, Program
+from .google_auth import GoogleAuthError, verify_google_id_token
 from .models import User
+
+
+class GoogleAuthTokenVerificationTests(APITestCase):
+    @override_settings(GOOGLE_OAUTH_CLIENT_IDS=["web-client-id", "desktop-client-id"])
+    @patch("users.google_auth.id_token.verify_oauth2_token")
+    def test_google_token_verification_accepts_any_configured_client_id(self, mock_verify):
+        def verify_side_effect(_token, _request, audience):
+            if audience == "web-client-id":
+                raise ValueError("wrong audience")
+            return {
+                "aud": audience,
+                "iss": "https://accounts.google.com",
+                "email": "faculty@ua.edu.ph",
+            }
+
+        mock_verify.side_effect = verify_side_effect
+
+        payload = verify_google_id_token("desktop-token")
+
+        self.assertEqual(payload["aud"], "desktop-client-id")
+        self.assertEqual(mock_verify.call_count, 2)
+
+    @override_settings(GOOGLE_OAUTH_CLIENT_IDS=["web-client-id", "desktop-client-id"])
+    @patch("users.google_auth.id_token.verify_oauth2_token")
+    def test_google_token_verification_rejects_unknown_client_id(self, mock_verify):
+        mock_verify.side_effect = ValueError("wrong audience")
+
+        with self.assertRaises(GoogleAuthError):
+            verify_google_id_token("unknown-client-token")
+
+        self.assertEqual(mock_verify.call_count, 2)
 
 
 class GoogleLoginTests(APITestCase):

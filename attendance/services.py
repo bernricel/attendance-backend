@@ -269,7 +269,7 @@ def build_webapp_scan_url(qr_token: str) -> str:
         or getattr(settings, "BACKEND_BASE_URL", "")
         or ""
     ).rstrip("/")
-    scan_path = f"/scan/{qr_token}"
+    scan_path = f"/faculty/scan/{qr_token}"
     return f"{base_url}{scan_path}" if base_url else scan_path
 
 

@@ -15,28 +15,35 @@ def verify_google_id_token(token):
 
     Validation performed:
     - token cryptographic validity (Google library verification)
-    - token audience matches configured Google OAuth client ID
+    - token audience matches one configured Google OAuth client ID
     - token issuer is an accepted Google issuer
 
     Raises GoogleAuthError for any validation issue.
     """
 
-    client_id = getattr(settings, "GOOGLE_OAUTH_CLIENT_ID", "")
+    client_ids = getattr(settings, "GOOGLE_OAUTH_CLIENT_IDS", [])
 
-    if not client_id:
+    if not client_ids:
         raise GoogleAuthError(
-            "GOOGLE_OAUTH_CLIENT_ID is not configured in environment/settings."
+            "GOOGLE_OAUTH_CLIENT_IDS is not configured in environment/settings."
         )
 
-    try:
-        # This verifies token signature + expiry + audience.
-        payload = id_token.verify_oauth2_token(
-            token,
-            requests.Request(),
-            audience=client_id,
-        )
-    except Exception as exc:
-        raise GoogleAuthError("Invalid Google ID token.") from exc
+    payload = None
+    last_error = None
+    for client_id in client_ids:
+        try:
+            # This verifies token signature + expiry + audience.
+            payload = id_token.verify_oauth2_token(
+                token,
+                requests.Request(),
+                audience=client_id,
+            )
+            break
+        except Exception as exc:
+            last_error = exc
+
+    if payload is None:
+        raise GoogleAuthError("Invalid Google ID token.") from last_error
 
     # Extra issuer hardening to accept only official Google identity providers.
     if payload.get("iss") not in {"accounts.google.com", "https://accounts.google.com"}:

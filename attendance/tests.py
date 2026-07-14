@@ -355,6 +355,32 @@ class AttendanceApiTests(APITestCase):
         self.assertEqual(response.data["session"]["id"], session.id)
         self.assertEqual(response.data["session"]["qr_url"], f"https://attendance.example.com/scan/{session.qr_token}")
 
+    def test_preview_accepts_same_token_from_backend_or_web_scan_url(self):
+        session = self._create_rule_session(name="Unified QR Session")
+
+        self._faculty_auth()
+        backend_url_response = self.client.post(
+            "/api/attendance/preview/",
+            {"qr_value": f"https://attendance.example.com/scan/{session.qr_token}"},
+            format="json",
+        )
+        web_url_response = self.client.post(
+            "/api/attendance/preview/",
+            {"qr_value": f"https://app.example.com/faculty/scan/{session.qr_token}"},
+            format="json",
+        )
+        raw_token_response = self.client.get(
+            "/api/attendance/session-preview",
+            {"qr_token": session.qr_token},
+        )
+
+        self.assertEqual(backend_url_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(web_url_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(raw_token_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(backend_url_response.data["session"]["qr_token"], str(session.qr_token))
+        self.assertEqual(web_url_response.data["session"]["qr_token"], str(session.qr_token))
+        self.assertEqual(raw_token_response.data["session"]["qr_token"], str(session.qr_token))
+
     def test_preview_shows_check_out_after_existing_check_in(self):
         now = timezone.now()
         session = self._create_rule_session(
@@ -432,7 +458,7 @@ class AttendanceApiTests(APITestCase):
         response = self.client.get(f"/scan/{session.qr_token}")
 
         self.assertEqual(response.status_code, status.HTTP_302_FOUND)
-        self.assertEqual(response["Location"], f"https://app.example.com/scan/{session.qr_token}")
+        self.assertEqual(response["Location"], f"https://app.example.com/faculty/scan/{session.qr_token}")
 
     def test_admin_qr_status_returns_current_rotating_token(self):
         session = self._create_rule_session(
@@ -493,6 +519,23 @@ class AttendanceApiTests(APITestCase):
         self.assertEqual(response.data["records"][0]["session_name"], "Faculty History Session")
         self.assertIsNotNone(response.data["records"][0]["check_in_time"])
         self.assertIsNotNone(response.data["records"][0]["check_out_time"])
+
+    def test_admin_can_export_attendance_sheet_pdf(self):
+        session = self._create_rule_session(name="PDF Export Session", department=self.department)
+        AttendanceRecord.objects.create(
+            user=self.faculty_user,
+            session=session,
+            attendance_type=AttendanceRecord.AttendanceType.CHECK_IN,
+            is_late=False,
+        )
+
+        self._admin_auth()
+        response = self.client.get("/api/admin/attendance-sheet/export-pdf")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response["Content-Type"], "application/pdf")
+        self.assertIn("attendance_sheet.pdf", response["Content-Disposition"])
+        self.assertTrue(response.content.startswith(b"%PDF-"))
 
     def test_delete_session_requires_correct_admin_password(self):
         session = self._create_rule_session(name="Protected Session")

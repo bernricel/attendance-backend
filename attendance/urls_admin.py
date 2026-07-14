@@ -2,6 +2,7 @@ from django.urls import path
 
 from .views_admin import (
     AdminAttendanceSheetExportCsvView,
+    AdminAttendanceSheetExportPdfView,
     AdminAttendanceSheetView,
     AdminDepartmentDetailView,
     AdminDepartmentListCreateView,
@@ -37,6 +38,7 @@ urlpatterns = [
     path("faculty-attendance", FacultyAttendanceRecordsView.as_view(), name="admin-faculty-attendance"),
     path("attendance-sheet", AdminAttendanceSheetView.as_view(), name="admin-attendance-sheet"),
     path("attendance-sheet/export-csv", AdminAttendanceSheetExportCsvView.as_view(), name="admin-attendance-sheet-export-csv"),
+    path("attendance-sheet/export-pdf", AdminAttendanceSheetExportPdfView.as_view(), name="admin-attendance-sheet-export-pdf"),
     # Frontend calls this endpoint to check if a specific record's DSA signature is still valid.
     path("verify-signature", VerifySignatureView.as_view(), name="admin-verify-signature"),
 ]
