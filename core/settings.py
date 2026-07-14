@@ -205,6 +205,12 @@ CORS_ALLOWED_ORIGINS = _get_list_env(
     "http://localhost:5173,http://127.0.0.1:5173",
 )
 
+BACKEND_BASE_URL = _get_env("BACKEND_BASE_URL", "")
+WEB_APP_BASE_URL = _get_env(
+    "WEB_APP_BASE_URL",
+    CORS_ALLOWED_ORIGINS[0] if CORS_ALLOWED_ORIGINS else BACKEND_BASE_URL,
+)
+
 # CSRF trusted origins should include deployed frontend origins in production.
 CSRF_TRUSTED_ORIGINS = _get_list_env("CSRF_TRUSTED_ORIGINS", "")
 

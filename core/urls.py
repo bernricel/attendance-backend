@@ -17,8 +17,11 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import include, path
 
+from attendance.views import UniversalQrScanRedirectView
+
 urlpatterns = [
     path('admin/', admin.site.urls),
+    path('scan/<str:qr_token>', UniversalQrScanRedirectView.as_view(), name='universal-qr-scan'),
     path('api/auth/', include('users.urls')),
     path('api/admin/', include('attendance.urls_admin')),
     path('api/attendance/', include('attendance.urls_faculty')),

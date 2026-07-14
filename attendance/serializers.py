@@ -5,7 +5,7 @@ from django.utils import timezone
 from rest_framework import serializers
 
 from .models import AttendanceRecord, AttendanceSchedule, AttendanceSession, Department
-from .services import get_session_action_state
+from .services import build_session_qr_url, get_session_action_state
 
 
 class DepartmentSerializer(serializers.ModelSerializer):
@@ -27,6 +27,7 @@ class AttendanceSessionSerializer(serializers.ModelSerializer):
     created_by_email = serializers.EmailField(source="created_by.email", read_only=True)
     attendance_count = serializers.SerializerMethodField()
     qr_token_expires_at = serializers.SerializerMethodField()
+    qr_url = serializers.SerializerMethodField()
     lifecycle_status = serializers.SerializerMethodField()
     can_accept_attendance = serializers.SerializerMethodField()
     department = serializers.SerializerMethodField()
@@ -60,6 +61,7 @@ class AttendanceSessionSerializer(serializers.ModelSerializer):
             "lifecycle_status",
             "can_accept_attendance",
             "qr_token",
+            "qr_url",
             "qr_refresh_interval_seconds",
             "qr_token_last_rotated_at",
             "qr_token_expires_at",
@@ -77,6 +79,9 @@ class AttendanceSessionSerializer(serializers.ModelSerializer):
 
     def get_qr_token_expires_at(self, obj):
         return obj.get_qr_expiry_time()
+
+    def get_qr_url(self, obj):
+        return build_session_qr_url(obj.qr_token)
 
     def get_lifecycle_status(self, obj):
         return obj.get_lifecycle_status()
@@ -417,11 +422,24 @@ class AttendanceRecordSerializer(serializers.ModelSerializer):
 
 
 class ScanAttendanceSerializer(serializers.Serializer):
-    qr_token = serializers.CharField(required=True, allow_blank=False)
+    qr_token = serializers.CharField(required=False, allow_blank=False)
+    qr_value = serializers.CharField(required=False, allow_blank=False)
     attendance_type = serializers.ChoiceField(
         choices=AttendanceRecord.AttendanceType.choices,
         required=False,
     )
+
+    def validate(self, attrs):
+        from .services import normalize_qr_token
+
+        normalized_token = normalize_qr_token(
+            qr_token=attrs.get("qr_token", ""),
+            qr_value=attrs.get("qr_value", ""),
+        )
+        if not normalized_token:
+            raise serializers.ValidationError("qr_token or qr_value is required.")
+        attrs["qr_token"] = normalized_token
+        return attrs
 
 
 class VerifySignatureSerializer(serializers.Serializer):
@@ -431,6 +449,7 @@ class VerifySignatureSerializer(serializers.Serializer):
 
 class FacultySessionPreviewSerializer(serializers.ModelSerializer):
     qr_refresh_interval_seconds = serializers.IntegerField(read_only=True)
+    qr_url = serializers.SerializerMethodField()
     lifecycle_status = serializers.SerializerMethodField()
     can_accept_attendance = serializers.SerializerMethodField()
     department = serializers.SerializerMethodField()
@@ -468,6 +487,7 @@ class FacultySessionPreviewSerializer(serializers.ModelSerializer):
             "attendance_completed",
             "action_message",
             "qr_token",
+            "qr_url",
             "qr_refresh_interval_seconds",
         )
 
@@ -479,6 +499,9 @@ class FacultySessionPreviewSerializer(serializers.ModelSerializer):
 
     def get_department(self, obj):
         return obj.department.name if obj.department else "All Departments"
+
+    def get_qr_url(self, obj):
+        return build_session_qr_url(obj.qr_token)
 
     def _get_action_state(self, obj):
         if not hasattr(self, "_action_state_cache"):

@@ -5,8 +5,11 @@ from .views_faculty import FacultyAttendanceHistoryView, FacultySessionPreviewVi
 urlpatterns = [
     # Frontend calls this first after scanning, to preview session details.
     path("session-preview", FacultySessionPreviewView.as_view(), name="attendance-session-preview"),
+    path("preview", FacultySessionPreviewView.as_view(), name="attendance-preview"),
+    path("preview/", FacultySessionPreviewView.as_view(), name="attendance-preview-slash"),
     # Frontend history page endpoint.
     path("my-records", FacultyAttendanceHistoryView.as_view(), name="attendance-my-records"),
     # Frontend confirms attendance here using the scanned QR token.
     path("scan", ScanAttendanceView.as_view(), name="attendance-scan"),
+    path("scan/", ScanAttendanceView.as_view(), name="attendance-scan-slash"),
 ]

@@ -7,7 +7,9 @@ readable, and easier to present in academic documentation.
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from urllib.parse import urlparse
 
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
@@ -242,11 +244,47 @@ def get_session_qr_status(session, *, rotate_if_expired=False, reference_time=No
         "lifecycle_status": lifecycle_status,
         "can_accept_attendance": can_accept_attendance,
         "qr_token": session.qr_token,
+        "qr_url": build_session_qr_url(session.qr_token),
         "qr_token_last_rotated_at": session.qr_token_last_rotated_at,
         "qr_token_expires_at": expires_at,
         "qr_refresh_interval_seconds": session.qr_refresh_interval_seconds,
         "seconds_until_rotation": seconds_remaining,
     }
+
+
+def build_session_qr_url(qr_token: str) -> str:
+    base_url = (getattr(settings, "BACKEND_BASE_URL", "") or "").rstrip("/")
+    scan_path = f"/scan/{qr_token}"
+    return f"{base_url}{scan_path}" if base_url else scan_path
+
+
+def build_webapp_scan_url(qr_token: str) -> str:
+    base_url = (
+        getattr(settings, "WEB_APP_BASE_URL", "")
+        or getattr(settings, "BACKEND_BASE_URL", "")
+        or ""
+    ).rstrip("/")
+    scan_path = f"/scan/{qr_token}"
+    return f"{base_url}{scan_path}" if base_url else scan_path
+
+
+def normalize_qr_token(*, qr_token: str = "", qr_value: str = "") -> str:
+    token = (qr_token or "").strip()
+    if token:
+        return token
+
+    value = (qr_value or "").strip()
+    if not value:
+        return ""
+
+    parsed = urlparse(value)
+    candidate = parsed.path.strip("/") if parsed.scheme or parsed.netloc else value.strip("/")
+    parts = [part for part in candidate.split("/") if part]
+    if len(parts) >= 2 and parts[-2] == "scan":
+        return parts[-1]
+    if len(parts) == 1:
+        return parts[0]
+    return ""
 
 
 def get_session_by_qr_token(qr_token: str):

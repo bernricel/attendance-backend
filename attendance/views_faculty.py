@@ -14,6 +14,7 @@ from .services import (
     create_signed_attendance_record,
     ensure_session_lifecycle_state,
     get_session_by_qr_token,
+    normalize_qr_token,
     rotate_session_qr_if_expired,
     validate_session_for_scan,
 )
@@ -25,17 +26,13 @@ class FacultySessionPreviewView(APIView):
     authentication_classes = [TokenAuthentication]
     permission_classes = [permissions.IsAuthenticated, IsFacultyRole]
 
-    def get(self, request):
-        # Preview endpoint lets faculty confirm details before submitting attendance.
-        # Faculty client sends qr_token from scanned QR URL/query parameter.
-        qr_token = (request.query_params.get("qr_token") or "").strip()
+    def _build_preview_response(self, request, qr_token: str):
         if not qr_token:
             return Response(
-                {"success": False, "message": "qr_token is required."},
+                {"success": False, "message": "qr_token or qr_value is required."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Token lookup resolves which session this QR belongs to.
         session = get_session_by_qr_token(qr_token)
         if not session:
             return Response(
@@ -64,10 +61,28 @@ class FacultySessionPreviewView(APIView):
             )
 
         serializer = FacultySessionPreviewSerializer(session, context={"request": request})
+        session_data = serializer.data
         return Response(
-            {"success": True, "session": serializer.data},
+            {
+                "success": True,
+                "session": session_data,
+                "session_status": session_data["lifecycle_status"],
+                "already_recorded": session_data["already_checked_in"] or session_data["already_checked_out"],
+            },
             status=status.HTTP_200_OK,
         )
+
+    def get(self, request):
+        qr_token = normalize_qr_token(
+            qr_token=request.query_params.get("qr_token", ""),
+            qr_value=request.query_params.get("qr_value", ""),
+        )
+        return self._build_preview_response(request, qr_token)
+
+    def post(self, request):
+        serializer = ScanAttendanceSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        return self._build_preview_response(request, serializer.validated_data["qr_token"])
 
 
 class FacultyAttendanceHistoryView(APIView):

@@ -1,5 +1,6 @@
 from datetime import timedelta
 
+from django.test import override_settings
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.authtoken.models import Token
@@ -9,6 +10,10 @@ from attendance.models import AttendanceRecord, AttendanceSession
 from users.models import User
 
 
+@override_settings(
+    BACKEND_BASE_URL="https://attendance.example.com",
+    WEB_APP_BASE_URL="https://app.example.com",
+)
 class AttendanceApiTests(APITestCase):
     def setUp(self):
         self.admin_password = "SecureAdminPass123!"
@@ -82,6 +87,10 @@ class AttendanceApiTests(APITestCase):
         self.assertEqual(response.data["session"]["session_type"], "mixed")
         self.assertEqual(response.data["session"]["department"], "CIT")
         self.assertEqual(response.data["session"]["qr_refresh_interval_seconds"], 45)
+        self.assertEqual(
+            response.data["session"]["qr_url"],
+            f"https://attendance.example.com/scan/{response.data['session']['qr_token']}",
+        )
         self.assertIsNone(response.data["session"]["late_threshold_time"])
 
     def test_admin_can_create_rule_based_recurring_schedule(self):
@@ -319,7 +328,23 @@ class AttendanceApiTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["session"]["id"], session.id)
+        self.assertEqual(response.data["session_status"], response.data["session"]["lifecycle_status"])
+        self.assertFalse(response.data["already_recorded"])
         self.assertIn("check_in_start_time", response.data["session"])
+
+    def test_faculty_can_preview_session_with_qr_value_post(self):
+        session = self._create_rule_session(name="Preview Session Post")
+
+        self._faculty_auth()
+        response = self.client.post(
+            "/api/attendance/preview/",
+            {"qr_value": f"https://attendance.example.com/scan/{session.qr_token}"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["session"]["id"], session.id)
+        self.assertEqual(response.data["session"]["qr_url"], f"https://attendance.example.com/scan/{session.qr_token}")
 
     def test_preview_shows_check_out_after_existing_check_in(self):
         now = timezone.now()
@@ -378,6 +403,27 @@ class AttendanceApiTests(APITestCase):
                 attendance_type=AttendanceRecord.AttendanceType.CHECK_OUT,
             ).exists()
         )
+
+    def test_scan_accepts_qr_value_payload(self):
+        session = self._create_rule_session()
+
+        self._faculty_auth()
+        response = self.client.post(
+            "/api/attendance/scan/",
+            {"qr_value": f"https://attendance.example.com/scan/{session.qr_token}"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["record"]["session"], session.id)
+
+    def test_universal_scan_route_redirects_to_webapp_scan_route(self):
+        session = self._create_rule_session()
+
+        response = self.client.get(f"/scan/{session.qr_token}")
+
+        self.assertEqual(response.status_code, status.HTTP_302_FOUND)
+        self.assertEqual(response["Location"], f"https://app.example.com/scan/{session.qr_token}")
 
     def test_admin_qr_status_returns_current_rotating_token(self):
         session = self._create_rule_session(
