@@ -38,6 +38,27 @@ def resolve_google_user_role(email: str) -> str:
     return User.Role.STUDENT if ".student@" in normalized_email else User.Role.FACULTY
 
 
+def build_admin_login_user_payload(user):
+    """
+    Return only the fields the desktop/admin clients need after credential login.
+    This avoids touching optional academic relations during admin login.
+    """
+    return {
+        "id": user.id,
+        "email": user.email,
+        "login_username": user.login_username,
+        "first_name": user.first_name,
+        "last_name": user.last_name,
+        "school_id": user.school_id,
+        "department": "",
+        "department_id": None,
+        "program": "",
+        "program_id": None,
+        "role": user.role,
+        "is_profile_complete": user.is_profile_complete,
+    }
+
+
 class GoogleLoginView(APIView):
     """
     Login/register endpoint for Google authentication.
@@ -272,7 +293,7 @@ class AdminLoginView(APIView):
                 "success": True,
                 "message": "Admin login successful.",
                 "token": token.key,
-                "user": UserSerializer(user).data,
+                "user": build_admin_login_user_payload(user),
             },
             status=status.HTTP_200_OK,
         )
