@@ -52,6 +52,16 @@ class User(AbstractUser):
     class Role(models.TextChoices):
         ADMIN = "admin", "Admin"
         FACULTY = "faculty", "Faculty"
+        STUDENT = "student", "Student"
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("school_id",),
+                condition=~models.Q(school_id=""),
+                name="unique_non_empty_user_school_id",
+            ),
+        ]
 
     username = None
     email = models.EmailField(unique=True)
@@ -67,6 +77,13 @@ class User(AbstractUser):
         null=True,
         blank=True,
     )
+    program = models.ForeignKey(
+        "attendance.Program",
+        on_delete=models.PROTECT,
+        related_name="users",
+        null=True,
+        blank=True,
+    )
     role = models.CharField(max_length=20, choices=Role.choices, default=Role.FACULTY)
     is_profile_complete = models.BooleanField(default=False)
 
@@ -75,18 +92,26 @@ class User(AbstractUser):
 
     objects = UserManager()
 
+    def has_required_academic_assignment(self):
+        if self.role == self.Role.ADMIN:
+            return True
+        if self.role == self.Role.FACULTY:
+            return self.department_id is not None and self.program_id is None
+        if self.role == self.Role.STUDENT:
+            return self.department_id is not None and self.program_id is not None
+        return False
+
     def refresh_profile_completion(self, save=True):
         """
         Recalculate profile completion status from required profile fields.
         Useful when profile fields are updated outside the standard serializer flow.
         """
-        department_ready = self.role != self.Role.FACULTY or self.department_id is not None
         self.is_profile_complete = all(
             [
                 self.first_name.strip(),
                 self.last_name.strip(),
                 self.school_id.strip(),
-                department_ready,
+                self.has_required_academic_assignment(),
             ]
         )
         if save:
@@ -97,13 +122,12 @@ class User(AbstractUser):
         self.email = self.email.lower()
         if self.login_username:
             self.login_username = self.login_username.strip().lower()
-        department_ready = self.role != self.Role.FACULTY or self.department_id is not None
         self.is_profile_complete = all(
             [
                 self.first_name.strip(),
                 self.last_name.strip(),
                 self.school_id.strip(),
-                department_ready,
+                self.has_required_academic_assignment(),
             ]
         )
         super().save(*args, **kwargs)

@@ -1,20 +1,118 @@
 from datetime import date, datetime, time
 
+from django.conf import settings
 from django.db.models import Count
 from django.utils import timezone
 from rest_framework import serializers
 
-from .models import AttendanceRecord, AttendanceSchedule, AttendanceSession, Department
+from .models import AttendanceRecord, AttendanceSchedule, AttendanceSession, Department, Program, Section
 from .services import build_session_qr_url, get_session_action_state
+
+
+class SectionSerializer(serializers.ModelSerializer):
+    program_id = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = Section
+        fields = (
+            "id",
+            "program_id",
+            "name",
+            "is_active",
+            "is_archived",
+            "created_at",
+            "updated_at",
+        )
+
+
+class SectionWriteSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Section
+        fields = ("name", "is_active", "is_archived")
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        name = (attrs.get("name") or getattr(self.instance, "name", "")).strip()
+        if not name:
+            raise serializers.ValidationError({"name": "This field may not be blank."})
+        attrs["name"] = name
+
+        program = self.context.get("program") or getattr(self.instance, "program", None)
+        if program:
+            queryset = Section.objects.filter(program=program, name__iexact=name)
+            if self.instance:
+                queryset = queryset.exclude(id=self.instance.id)
+            if queryset.exists():
+                raise serializers.ValidationError({"name": "A section with this name already exists in the selected program."})
+
+        is_archived = attrs.get("is_archived", getattr(self.instance, "is_archived", False))
+        if is_archived:
+            attrs["is_active"] = False
+        return attrs
+
+
+class ProgramSerializer(serializers.ModelSerializer):
+    department_id = serializers.IntegerField(read_only=True)
+    sections = SectionSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Program
+        fields = (
+            "id",
+            "department_id",
+            "name",
+            "code",
+            "is_active",
+            "is_archived",
+            "sections",
+            "created_at",
+            "updated_at",
+        )
+
+
+class ProgramWriteSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Program
+        fields = ("name", "code", "is_active", "is_archived")
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        name = (attrs.get("name") or getattr(self.instance, "name", "")).strip()
+        code = (attrs.get("code") or getattr(self.instance, "code", "")).strip()
+
+        if not name:
+            raise serializers.ValidationError({"name": "This field may not be blank."})
+        if not code:
+            raise serializers.ValidationError({"code": "This field may not be blank."})
+
+        attrs["name"] = name
+        attrs["code"] = code
+
+        department = self.context.get("department") or getattr(self.instance, "department", None)
+        if department:
+            name_queryset = Program.objects.filter(department=department, name__iexact=name)
+            code_queryset = Program.objects.filter(department=department, code__iexact=code)
+            if self.instance:
+                name_queryset = name_queryset.exclude(id=self.instance.id)
+                code_queryset = code_queryset.exclude(id=self.instance.id)
+            if name_queryset.exists():
+                raise serializers.ValidationError({"name": "A program with this name already exists in the selected department."})
+            if code_queryset.exists():
+                raise serializers.ValidationError({"code": "A program with this code already exists in the selected department."})
+
+        if attrs.get("is_archived", getattr(self.instance, "is_archived", False)):
+            attrs["is_active"] = False
+        return attrs
 
 
 class DepartmentSerializer(serializers.ModelSerializer):
     user_count = serializers.IntegerField(read_only=True)
     session_count = serializers.IntegerField(read_only=True)
+    programs = ProgramSerializer(many=True, read_only=True)
 
     class Meta:
         model = Department
-        fields = ("id", "name", "is_active", "user_count", "session_count", "created_at", "updated_at")
+        fields = ("id", "name", "is_active", "programs", "user_count", "session_count", "created_at", "updated_at")
 
 
 class DepartmentWriteSerializer(serializers.ModelSerializer):
@@ -32,6 +130,9 @@ class AttendanceSessionSerializer(serializers.ModelSerializer):
     can_accept_attendance = serializers.SerializerMethodField()
     department = serializers.SerializerMethodField()
     department_id = serializers.IntegerField(read_only=True)
+    allowed_departments = serializers.SerializerMethodField()
+    allowed_programs = serializers.SerializerMethodField()
+    allowed_sections = serializers.SerializerMethodField()
     check_in_start_time = serializers.DateTimeField(required=False, allow_null=True)
     check_in_end_time = serializers.DateTimeField(required=False, allow_null=True)
     late_threshold_time = serializers.DateTimeField(required=False, allow_null=True)
@@ -44,8 +145,12 @@ class AttendanceSessionSerializer(serializers.ModelSerializer):
         fields = (
             "id",
             "name",
+            "allowed_roles",
             "department",
             "department_id",
+            "allowed_departments",
+            "allowed_programs",
+            "allowed_sections",
             "session_type",
             "start_time",
             "end_time",
@@ -90,7 +195,20 @@ class AttendanceSessionSerializer(serializers.ModelSerializer):
         return obj.is_accepting_attendance()
 
     def get_department(self, obj):
-        return obj.department.name if obj.department else "All Departments"
+        if obj.department:
+            return obj.department.name
+        if obj.allowed_departments.exists():
+            return "Custom Audience"
+        return "All Departments"
+
+    def get_allowed_departments(self, obj):
+        return list(obj.allowed_departments.order_by("name").values("id", "name"))
+
+    def get_allowed_programs(self, obj):
+        return list(obj.allowed_programs.order_by("code", "name").values("id", "name", "code", "department_id"))
+
+    def get_allowed_sections(self, obj):
+        return list(obj.allowed_sections.order_by("name").values("id", "name", "program_id"))
 
 
 class CreateSessionSerializer(serializers.Serializer):
@@ -106,6 +224,26 @@ class CreateSessionSerializer(serializers.Serializer):
     # Backward-compatible alias so existing clients are not immediately broken.
     name = serializers.CharField(max_length=255, required=False, allow_blank=False)
     department_id = serializers.IntegerField(required=False, allow_null=True, min_value=1)
+    allowed_roles = serializers.ChoiceField(
+        choices=AttendanceSession.AllowedRole.choices,
+        required=False,
+        default=AttendanceSession.AllowedRole.BOTH,
+    )
+    allowed_department_ids = serializers.ListField(
+        child=serializers.IntegerField(min_value=1),
+        required=False,
+        allow_empty=True,
+    )
+    allowed_program_ids = serializers.ListField(
+        child=serializers.IntegerField(min_value=1),
+        required=False,
+        allow_empty=True,
+    )
+    allowed_section_ids = serializers.ListField(
+        child=serializers.IntegerField(min_value=1),
+        required=False,
+        allow_empty=True,
+    )
     is_active = serializers.BooleanField(required=False, default=True)
     qr_refresh_interval_seconds = serializers.IntegerField(required=False, min_value=1, default=30)
 
@@ -156,14 +294,55 @@ class CreateSessionSerializer(serializers.Serializer):
         if not title:
             raise serializers.ValidationError("title is required.")
         attrs["name"] = title
-        department_id = attrs.get("department_id")
-        if department_id:
-            try:
-                attrs["department"] = Department.objects.get(id=department_id, is_active=True)
-            except Department.DoesNotExist:
-                raise serializers.ValidationError("Selected department is invalid or inactive.")
-        else:
-            attrs["department"] = None
+        raw_allowed_department_ids = attrs.get("allowed_department_ids", None)
+        allowed_department_ids = sorted(set(raw_allowed_department_ids or []))
+        if attrs.get("department_id"):
+            allowed_department_ids = sorted(set(allowed_department_ids + [attrs["department_id"]]))
+        elif raw_allowed_department_ids is None:
+            default_department_name = getattr(settings, "DEFAULT_ATTENDANCE_DEPARTMENT", "")
+            default_department = Department.objects.filter(name__iexact=default_department_name, is_active=True).first()
+            if default_department:
+                allowed_department_ids = [default_department.id]
+        allowed_program_ids = sorted(set(attrs.get("allowed_program_ids", [])))
+        allowed_section_ids = sorted(set(attrs.get("allowed_section_ids", [])))
+        allowed_roles = attrs.get("allowed_roles", AttendanceSession.AllowedRole.BOTH)
+
+        departments = list(Department.objects.filter(id__in=allowed_department_ids, is_active=True))
+        if len(departments) != len(allowed_department_ids):
+            raise serializers.ValidationError("One or more selected departments are invalid or inactive.")
+        attrs["allowed_departments_queryset"] = departments
+        attrs["department"] = departments[0] if len(departments) == 1 else None
+
+        if allowed_roles == AttendanceSession.AllowedRole.FACULTY and (allowed_program_ids or allowed_section_ids):
+            raise serializers.ValidationError("Program and section restrictions are only valid for student audiences.")
+
+        programs = list(
+            Program.objects.select_related("department").filter(
+                id__in=allowed_program_ids,
+                is_active=True,
+                is_archived=False,
+            )
+        )
+        if len(programs) != len(allowed_program_ids):
+            raise serializers.ValidationError("One or more selected programs are invalid, inactive, or archived.")
+        if allowed_department_ids and any(program.department_id not in allowed_department_ids for program in programs):
+            raise serializers.ValidationError("Selected programs must belong to the allowed departments.")
+        attrs["allowed_programs_queryset"] = programs
+
+        sections = list(
+            Section.objects.select_related("program").filter(
+                id__in=allowed_section_ids,
+                is_active=True,
+                is_archived=False,
+            )
+        )
+        if len(sections) != len(allowed_section_ids):
+            raise serializers.ValidationError("One or more selected sections are invalid, inactive, or archived.")
+        if allowed_section_ids and not allowed_program_ids:
+            raise serializers.ValidationError("allowed_program_ids is required when section restrictions are provided.")
+        if allowed_program_ids and any(section.program_id not in allowed_program_ids for section in sections):
+            raise serializers.ValidationError("Selected sections must belong to the allowed programs.")
+        attrs["allowed_sections_queryset"] = sections
 
         is_recurring = attrs.get("is_recurring", False)
         has_explicit_check_in_toggle = "enable_check_in_window" in self.initial_data
@@ -334,7 +513,11 @@ class AttendanceScheduleSerializer(serializers.ModelSerializer):
         return [int(value) for value in obj.custom_weekdays.split(",") if value != ""]
 
     def get_department(self, obj):
-        return obj.department.name if obj.department else "All Departments"
+        if obj.department:
+            return obj.department.name
+        if obj.allowed_departments.exists():
+            return "Custom Audience"
+        return "All Departments"
 
 
 class CreateScheduleSerializer(serializers.ModelSerializer):
@@ -399,6 +582,8 @@ class AttendanceRecordSerializer(serializers.ModelSerializer):
     user_email = serializers.EmailField(source="user.email", read_only=True)
     user_first_name = serializers.CharField(source="user.first_name", read_only=True)
     user_last_name = serializers.CharField(source="user.last_name", read_only=True)
+    section = serializers.CharField(source="section.name", read_only=True)
+    section_id = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = AttendanceRecord
@@ -411,6 +596,8 @@ class AttendanceRecordSerializer(serializers.ModelSerializer):
             "session",
             "session_name",
             "session_type",
+            "section",
+            "section_id",
             "check_time",
             "attendance_type",
             "status",
@@ -424,6 +611,7 @@ class AttendanceRecordSerializer(serializers.ModelSerializer):
 class ScanAttendanceSerializer(serializers.Serializer):
     qr_token = serializers.CharField(required=False, allow_blank=False)
     qr_value = serializers.CharField(required=False, allow_blank=False)
+    section_id = serializers.IntegerField(required=False, allow_null=True, min_value=1)
     attendance_type = serializers.ChoiceField(
         choices=AttendanceRecord.AttendanceType.choices,
         required=False,
@@ -454,6 +642,11 @@ class FacultySessionPreviewSerializer(serializers.ModelSerializer):
     can_accept_attendance = serializers.SerializerMethodField()
     department = serializers.SerializerMethodField()
     department_id = serializers.IntegerField(read_only=True)
+    allowed_departments = serializers.SerializerMethodField()
+    allowed_programs = serializers.SerializerMethodField()
+    allowed_sections = serializers.SerializerMethodField()
+    available_sections = serializers.SerializerMethodField()
+    requires_section_selection = serializers.SerializerMethodField()
     already_checked_in = serializers.SerializerMethodField()
     already_checked_out = serializers.SerializerMethodField()
     next_valid_action = serializers.SerializerMethodField()
@@ -465,8 +658,14 @@ class FacultySessionPreviewSerializer(serializers.ModelSerializer):
         fields = (
             "id",
             "name",
+            "allowed_roles",
             "department",
             "department_id",
+            "allowed_departments",
+            "allowed_programs",
+            "allowed_sections",
+            "available_sections",
+            "requires_section_selection",
             "session_type",
             "start_time",
             "end_time",
@@ -499,6 +698,29 @@ class FacultySessionPreviewSerializer(serializers.ModelSerializer):
 
     def get_department(self, obj):
         return obj.department.name if obj.department else "All Departments"
+
+    def get_allowed_departments(self, obj):
+        return list(obj.allowed_departments.order_by("name").values("id", "name"))
+
+    def get_allowed_programs(self, obj):
+        return list(obj.allowed_programs.order_by("code", "name").values("id", "name", "code", "department_id"))
+
+    def get_allowed_sections(self, obj):
+        return list(obj.allowed_sections.order_by("name").values("id", "name", "program_id"))
+
+    def get_requires_section_selection(self, obj):
+        return obj.allowed_sections.exists()
+
+    def get_available_sections(self, obj):
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        if not user or user.role != "student" or not user.program_id or not obj.allowed_sections.exists():
+            return []
+        return list(
+            obj.allowed_sections.filter(program_id=user.program_id, is_active=True, is_archived=False)
+            .order_by("name")
+            .values("id", "name", "program_id")
+        )
 
     def get_qr_url(self, obj):
         return build_session_qr_url(obj.qr_token)
@@ -542,6 +764,10 @@ class FacultySessionPreviewSerializer(serializers.ModelSerializer):
 
 class AttendanceByDateQuerySerializer(serializers.Serializer):
     date = serializers.DateField(required=True)
+    role = serializers.ChoiceField(required=False, choices=["faculty", "student"])
+    department_id = serializers.IntegerField(required=False, min_value=1)
+    program_id = serializers.IntegerField(required=False, min_value=1)
+    section_id = serializers.IntegerField(required=False, min_value=1)
 
     def validate_date(self, value: date):
         if value > timezone.localdate():
@@ -569,6 +795,10 @@ class AdminAttendanceSheetQuerySerializer(serializers.Serializer):
     session_id = serializers.IntegerField(required=False, min_value=1)
     date = serializers.DateField(required=False)
     faculty_id = serializers.IntegerField(required=False, min_value=1)
+    role = serializers.ChoiceField(required=False, choices=["faculty", "student"])
+    department_id = serializers.IntegerField(required=False, min_value=1)
+    program_id = serializers.IntegerField(required=False, min_value=1)
+    section_id = serializers.IntegerField(required=False, min_value=1)
     attendance_status = serializers.ChoiceField(
         required=False,
         choices=["on_time", "late", "incomplete", "checked_out"],
@@ -596,7 +826,11 @@ class AdminSessionDeleteSerializer(serializers.Serializer):
 
 def get_session_queryset_with_counts():
     return (
-        AttendanceSession.objects.select_related("created_by", "department")
+        AttendanceSession.objects.select_related("created_by", "department").prefetch_related(
+            "allowed_departments",
+            "allowed_programs",
+            "allowed_sections",
+        )
         .annotate(attendance_count=Count("attendance_records"))
         .order_by("-created_at", "-id")
     )

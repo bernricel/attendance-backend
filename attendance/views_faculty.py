@@ -4,7 +4,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import AttendanceRecord
-from .permissions import IsFacultyRole
+from .permissions import IsAttendanceParticipantRole
 from .serializers import (
     AttendanceRecordSerializer,
     FacultySessionPreviewSerializer,
@@ -16,6 +16,7 @@ from .services import (
     get_session_by_qr_token,
     normalize_qr_token,
     rotate_session_qr_if_expired,
+    user_matches_session_audience,
     validate_session_for_scan,
 )
 
@@ -24,7 +25,7 @@ class FacultySessionPreviewView(APIView):
     """Preview session details from QR token before the faculty confirms attendance."""
 
     authentication_classes = [TokenAuthentication]
-    permission_classes = [permissions.IsAuthenticated, IsFacultyRole]
+    permission_classes = [permissions.IsAuthenticated, IsAttendanceParticipantRole]
 
     def _build_preview_response(self, request, qr_token: str):
         if not qr_token:
@@ -39,6 +40,10 @@ class FacultySessionPreviewView(APIView):
                 {"success": False, "message": "Invalid QR token. Session not found."},
                 status=status.HTTP_404_NOT_FOUND,
             )
+
+        audience_allowed, audience_message = user_matches_session_audience(user=request.user, session=session)
+        if not audience_allowed:
+            return Response({"success": False, "message": audience_message}, status=status.HTTP_403_FORBIDDEN)
 
         # Lifecycle checks prevent preview/scan of sessions that are not usable.
         lifecycle_status = ensure_session_lifecycle_state(session)
@@ -68,6 +73,7 @@ class FacultySessionPreviewView(APIView):
                 "session": session_data,
                 "session_status": session_data["lifecycle_status"],
                 "already_recorded": session_data["already_checked_in"] or session_data["already_checked_out"],
+                "sections": session_data["available_sections"],
             },
             status=status.HTTP_200_OK,
         )
@@ -89,12 +95,12 @@ class FacultyAttendanceHistoryView(APIView):
     """Return only the authenticated faculty member's own attendance history."""
 
     authentication_classes = [TokenAuthentication]
-    permission_classes = [permissions.IsAuthenticated, IsFacultyRole]
+    permission_classes = [permissions.IsAuthenticated, IsAttendanceParticipantRole]
 
     def get(self, request):
         # Utility endpoint for faculty history page (not QR generation, but related flow feedback).
         records = (
-            AttendanceRecord.objects.select_related("user", "session", "session__department")
+            AttendanceRecord.objects.select_related("user", "session", "session__department", "section")
             .filter(user=request.user)
             .order_by("-check_time")
         )
@@ -117,7 +123,7 @@ class ScanAttendanceView(APIView):
     """
 
     authentication_classes = [TokenAuthentication]
-    permission_classes = [permissions.IsAuthenticated, IsFacultyRole]
+    permission_classes = [permissions.IsAuthenticated, IsAttendanceParticipantRole]
 
     def post(self, request):
         # Final QR submit endpoint: validates token/window rules then records attendance.
@@ -143,6 +149,7 @@ class ScanAttendanceView(APIView):
             session=session,
             attendance_type=attendance_type,
             scanned_qr_token=data["qr_token"],
+            section_id=data.get("section_id"),
         )
         if not validation.is_valid:
             return Response(
@@ -158,6 +165,7 @@ class ScanAttendanceView(APIView):
             session=session,
             attendance_type=validation.resolved_attendance_type,
             is_late=validation.is_late,
+            section=validation.section,
         )
 
         return Response(

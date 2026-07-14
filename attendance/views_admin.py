@@ -7,13 +7,14 @@ from django.utils.dateparse import parse_datetime
 from django.utils import timezone
 from django.db import transaction
 from django.db.models import Count
+from django.db.models import Prefetch
 from rest_framework.exceptions import ValidationError
 from rest_framework import permissions, status
 from rest_framework.authentication import TokenAuthentication
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import AttendanceRecord, AttendanceSchedule, AttendanceSession, Department
+from .models import AttendanceRecord, AttendanceSchedule, AttendanceSession, Department, Program, Section
 from .permissions import IsAdminRole
 from .serializers import (
     AdminFacultyAttendanceQuerySerializer,
@@ -26,6 +27,10 @@ from .serializers import (
     CreateSessionSerializer,
     DepartmentSerializer,
     DepartmentWriteSerializer,
+    ProgramSerializer,
+    ProgramWriteSerializer,
+    SectionSerializer,
+    SectionWriteSerializer,
     VerifySignatureSerializer,
     get_session_queryset_with_counts,
 )
@@ -58,10 +63,21 @@ def _format_csv_time(value):
 
 
 def _build_attendance_sheet_rows(*, filters):
-    records = AttendanceRecord.objects.select_related("user", "session", "session__department").all()
+    records = AttendanceRecord.objects.select_related(
+        "user",
+        "user__department",
+        "user__program",
+        "session",
+        "session__department",
+        "section",
+    ).all()
     session_id = filters.get("session_id")
     target_date = filters.get("date")
     faculty_id = filters.get("faculty_id")
+    role = filters.get("role")
+    department_id = filters.get("department_id")
+    program_id = filters.get("program_id")
+    section_id = filters.get("section_id")
     attendance_status_filter = filters.get("attendance_status")
     signature_status_filter = filters.get("signature_status")
     sort_by = filters.get("sort_by", "time_in")
@@ -73,6 +89,14 @@ def _build_attendance_sheet_rows(*, filters):
         records = records.filter(session__start_time__date=target_date)
     if faculty_id:
         records = records.filter(user_id=faculty_id)
+    if role:
+        records = records.filter(user__role=role)
+    if department_id:
+        records = records.filter(user__department_id=department_id)
+    if program_id:
+        records = records.filter(user__program_id=program_id)
+    if section_id:
+        records = records.filter(section_id=section_id)
 
     grouped_rows = {}
     for record in records.order_by("-check_time"):
@@ -89,6 +113,9 @@ def _build_attendance_sheet_rows(*, filters):
                 "faculty_id": record.user_id,
                 "faculty_name": faculty_name,
                 "email": record.user.email,
+                "role": record.user.role,
+                "program": record.user.program.code if record.user.program else "",
+                "section": record.section.name if record.section else "",
                 "time_in": None,
                 "time_out": None,
                 "attendance_status": ATTENDANCE_STATUS_LABELS["incomplete"],
@@ -204,6 +231,7 @@ class CreateSessionView(APIView):
             schedule = AttendanceSchedule.objects.create(
                 name=data["name"],
                 department=data["department"],
+                allowed_roles=data["allowed_roles"],
                 session_type=AttendanceSession.SessionType.MIXED,
                 start_time=recurring_start_time,
                 end_time=recurring_session_end_time or recurring_start_time,
@@ -219,6 +247,9 @@ class CreateSessionView(APIView):
                 qr_refresh_interval_seconds=data["qr_refresh_interval_seconds"],
                 created_by=request.user,
             )
+            schedule.allowed_departments.set(data["allowed_departments_queryset"])
+            schedule.allowed_programs.set(data["allowed_programs_queryset"])
+            schedule.allowed_sections.set(data["allowed_sections_queryset"])
             generation_summary = generate_sessions_from_schedule(
                 schedule,
                 enable_check_in_window=data["enable_check_in_window"],
@@ -248,6 +279,7 @@ class CreateSessionView(APIView):
         session = AttendanceSession.objects.create(
             name=data["name"],
             department=data["department"],
+            allowed_roles=data["allowed_roles"],
             session_type=AttendanceSession.SessionType.MIXED,
             start_time=datetime_windows["start_time"],
             end_time=datetime_windows["end_time"],
@@ -263,6 +295,9 @@ class CreateSessionView(APIView):
             qr_refresh_interval_seconds=data["qr_refresh_interval_seconds"],
             created_by=request.user,
         )
+        session.allowed_departments.set(data["allowed_departments_queryset"])
+        session.allowed_programs.set(data["allowed_programs_queryset"])
+        session.allowed_sections.set(data["allowed_sections_queryset"])
 
         output = AttendanceSessionSerializer(session).data
         return Response(
@@ -333,10 +368,18 @@ class AdminDepartmentListCreateView(APIView):
         search = (request.query_params.get("search") or "").strip()
         active_only = request.query_params.get("active_only") == "1"
 
-        departments = Department.objects.annotate(
-            user_count=Count("users", distinct=True),
-            session_count=Count("sessions", distinct=True),
-        ).order_by("name")
+        section_queryset = Section.objects.order_by("name")
+        program_queryset = Program.objects.prefetch_related(
+            Prefetch("sections", queryset=section_queryset),
+        ).order_by("code", "name")
+        departments = (
+            Department.objects.annotate(
+                user_count=Count("users", distinct=True),
+                session_count=Count("sessions", distinct=True),
+            )
+            .prefetch_related(Prefetch("programs", queryset=program_queryset))
+            .order_by("name")
+        )
 
         if active_only:
             departments = departments.filter(is_active=True)
@@ -380,6 +423,169 @@ class AdminDepartmentDetailView(APIView):
         )
 
 
+class AdminDepartmentProgramListCreateView(APIView):
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [permissions.IsAuthenticated, IsAdminRole]
+
+    def get(self, request, department_id):
+        try:
+            department = Department.objects.prefetch_related("programs__sections").get(id=department_id)
+        except Department.DoesNotExist:
+            return Response(
+                {"success": False, "message": "Department not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        programs = department.programs.all().order_by("code", "name")
+        return Response(
+            {"success": True, "programs": ProgramSerializer(programs, many=True).data},
+            status=status.HTTP_200_OK,
+        )
+
+    def post(self, request, department_id):
+        try:
+            department = Department.objects.get(id=department_id)
+        except Department.DoesNotExist:
+            return Response(
+                {"success": False, "message": "Department not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        serializer = ProgramWriteSerializer(data=request.data, context={"department": department})
+        serializer.is_valid(raise_exception=True)
+        program = serializer.save(department=department)
+        return Response(
+            {"success": True, "program": ProgramSerializer(program).data},
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class AdminProgramDetailView(APIView):
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [permissions.IsAuthenticated, IsAdminRole]
+
+    def patch(self, request, program_id):
+        try:
+            program = Program.objects.get(id=program_id)
+        except Program.DoesNotExist:
+            return Response(
+                {"success": False, "message": "Program not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        serializer = ProgramWriteSerializer(instance=program, data=request.data, partial=True, context={"department": program.department})
+        serializer.is_valid(raise_exception=True)
+        program = serializer.save()
+        return Response(
+            {"success": True, "program": ProgramSerializer(program).data},
+            status=status.HTTP_200_OK,
+        )
+
+    def delete(self, request, program_id):
+        try:
+            program = Program.objects.get(id=program_id)
+        except Program.DoesNotExist:
+            return Response(
+                {"success": False, "message": "Program not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if (
+            program.users.exists()
+            or program.sections.exists()
+            or AttendanceSession.objects.filter(allowed_programs=program).exists()
+            or AttendanceSchedule.objects.filter(allowed_programs=program).exists()
+        ):
+            return Response(
+                {"success": False, "message": "Program cannot be deleted because it is still in use."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        program.delete()
+        return Response({"success": True, "message": "Program deleted successfully."}, status=status.HTTP_200_OK)
+
+
+class AdminProgramSectionListCreateView(APIView):
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [permissions.IsAuthenticated, IsAdminRole]
+
+    def get(self, request, program_id):
+        try:
+            program = Program.objects.prefetch_related("sections").get(id=program_id)
+        except Program.DoesNotExist:
+            return Response(
+                {"success": False, "message": "Program not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        sections = program.sections.all().order_by("name")
+        return Response(
+            {"success": True, "sections": SectionSerializer(sections, many=True).data},
+            status=status.HTTP_200_OK,
+        )
+
+    def post(self, request, program_id):
+        try:
+            program = Program.objects.get(id=program_id)
+        except Program.DoesNotExist:
+            return Response(
+                {"success": False, "message": "Program not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        serializer = SectionWriteSerializer(data=request.data, context={"program": program})
+        serializer.is_valid(raise_exception=True)
+        section = serializer.save(program=program)
+        return Response(
+            {"success": True, "section": SectionSerializer(section).data},
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class AdminSectionDetailView(APIView):
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [permissions.IsAuthenticated, IsAdminRole]
+
+    def patch(self, request, section_id):
+        try:
+            section = Section.objects.get(id=section_id)
+        except Section.DoesNotExist:
+            return Response(
+                {"success": False, "message": "Section not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        serializer = SectionWriteSerializer(instance=section, data=request.data, partial=True, context={"program": section.program})
+        serializer.is_valid(raise_exception=True)
+        section = serializer.save()
+        return Response(
+            {"success": True, "section": SectionSerializer(section).data},
+            status=status.HTTP_200_OK,
+        )
+
+    def delete(self, request, section_id):
+        try:
+            section = Section.objects.get(id=section_id)
+        except Section.DoesNotExist:
+            return Response(
+                {"success": False, "message": "Section not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if (
+            section.attendance_records.exists()
+            or AttendanceSession.objects.filter(allowed_sections=section).exists()
+            or AttendanceSchedule.objects.filter(allowed_sections=section).exists()
+        ):
+            return Response(
+                {"success": False, "message": "Section cannot be deleted because it is still in use."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        section.delete()
+        return Response({"success": True, "message": "Section deleted successfully."}, status=status.HTTP_200_OK)
+
+
 class AttendanceByDateView(APIView):
     """Admin report endpoint: attendance records filtered by a specific date."""
 
@@ -392,10 +598,23 @@ class AttendanceByDateView(APIView):
         target_date = query_serializer.validated_data["date"]
 
         records = (
-            AttendanceRecord.objects.select_related("user", "session")
+            AttendanceRecord.objects.select_related("user", "user__program", "session", "section")
             .filter(check_time__date=target_date)
             .order_by("-check_time")
         )
+
+        role = query_serializer.validated_data.get("role")
+        department_id = query_serializer.validated_data.get("department_id")
+        program_id = query_serializer.validated_data.get("program_id")
+        section_id = query_serializer.validated_data.get("section_id")
+        if role:
+            records = records.filter(user__role=role)
+        if department_id:
+            records = records.filter(user__department_id=department_id)
+        if program_id:
+            records = records.filter(user__program_id=program_id)
+        if section_id:
+            records = records.filter(section_id=section_id)
 
         serialized_records = AttendanceRecordSerializer(records, many=True).data
         return Response(

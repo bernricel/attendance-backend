@@ -1,6 +1,27 @@
 from django.contrib import admin
 
-from .models import AttendanceRecord, AttendanceSchedule, AttendanceSession
+from .models import AttendanceRecord, AttendanceSchedule, AttendanceSession, Department, Program, Section
+
+
+@admin.register(Department)
+class DepartmentAdmin(admin.ModelAdmin):
+    list_display = ("id", "name", "is_active", "created_at", "updated_at")
+    list_filter = ("is_active",)
+    search_fields = ("name",)
+
+
+@admin.register(Program)
+class ProgramAdmin(admin.ModelAdmin):
+    list_display = ("id", "name", "code", "department", "is_active", "created_at", "updated_at")
+    list_filter = ("is_active", "department")
+    search_fields = ("name", "code", "department__name")
+
+
+@admin.register(Section)
+class SectionAdmin(admin.ModelAdmin):
+    list_display = ("id", "name", "program", "is_active", "is_archived", "created_at", "updated_at")
+    list_filter = ("is_active", "is_archived", "program__department", "program")
+    search_fields = ("name", "program__code", "program__name", "program__department__name")
 
 
 @admin.register(AttendanceSchedule)

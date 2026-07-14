@@ -6,7 +6,7 @@ from rest_framework import status
 from rest_framework.authtoken.models import Token
 from rest_framework.test import APITestCase
 
-from attendance.models import AttendanceRecord, AttendanceSession
+from attendance.models import AttendanceRecord, AttendanceSession, Department
 from users.models import User
 
 
@@ -16,6 +16,7 @@ from users.models import User
 )
 class AttendanceApiTests(APITestCase):
     def setUp(self):
+        self.department = Department.objects.create(name="CIT")
         self.admin_password = "SecureAdminPass123!"
         self.admin_user = User.objects.create_user(
             email="admin@ua.edu.ph",
@@ -23,12 +24,14 @@ class AttendanceApiTests(APITestCase):
             role=User.Role.ADMIN,
             first_name="System",
             last_name="Admin",
+            department=self.department,
         )
         self.faculty_user = User.objects.create_user(
             email="faculty@ua.edu.ph",
             role=User.Role.FACULTY,
             first_name="Faculty",
             last_name="Member",
+            department=self.department,
         )
 
         self.admin_token = Token.objects.create(user=self.admin_user).key
@@ -44,7 +47,8 @@ class AttendanceApiTests(APITestCase):
         now = timezone.now()
         defaults = {
             "name": "Rule Session",
-            "department": "CIT",
+            "department": self.department,
+            "allowed_roles": AttendanceSession.AllowedRole.BOTH,
             "session_type": AttendanceSession.SessionType.MIXED,
             "start_time": now - timedelta(hours=1),
             "end_time": now + timedelta(hours=7),
@@ -60,7 +64,10 @@ class AttendanceApiTests(APITestCase):
             "created_by": self.admin_user,
         }
         defaults.update(overrides)
-        return AttendanceSession.objects.create(**defaults)
+        session = AttendanceSession.objects.create(**defaults)
+        if not overrides.get("skip_audience_setup"):
+            session.allowed_departments.set([self.department])
+        return session
 
     def test_admin_can_create_rule_based_single_session(self):
         self._admin_auth()
@@ -272,6 +279,7 @@ class AttendanceApiTests(APITestCase):
             late_threshold_time=now - timedelta(hours=1, minutes=30),
             check_out_start_time=now - timedelta(hours=1),
             check_out_end_time=now - timedelta(minutes=2),
+            session_end_time=now - timedelta(minutes=1),
             is_active=True,
         )
 
@@ -309,6 +317,7 @@ class AttendanceApiTests(APITestCase):
             late_threshold_time=now - timedelta(hours=2, minutes=45),
             check_out_start_time=now - timedelta(hours=2, minutes=20),
             check_out_end_time=now - timedelta(hours=2, minutes=5),
+            session_end_time=now - timedelta(hours=2),
         )
 
         self._admin_auth()
@@ -460,7 +469,7 @@ class AttendanceApiTests(APITestCase):
         self.assertTrue(session.is_active)
 
     def test_admin_can_fetch_faculty_attendance_history(self):
-        session = self._create_rule_session(name="Faculty History Session", department="CIT")
+        session = self._create_rule_session(name="Faculty History Session", department=self.department)
         AttendanceRecord.objects.create(
             user=self.faculty_user,
             session=session,

@@ -15,7 +15,7 @@ from django.utils import timezone
 
 # DSA helper functions: build payload, sign payload, and verify signature.
 from .dsa_service import build_attendance_payload, sign_payload, verify_payload_signature
-from .models import AttendanceRecord, AttendanceSchedule, AttendanceSession
+from .models import AttendanceRecord, AttendanceSchedule, AttendanceSession, Program, Section
 
 
 @dataclass
@@ -26,6 +26,7 @@ class ScanValidationResult:
     resolved_attendance_type: str = ""
     is_late: bool = False
     lifecycle_status: str = ""
+    section: Section | None = None
 
 
 @dataclass
@@ -180,6 +181,7 @@ def generate_sessions_from_schedule(
                 session = AttendanceSession.objects.create(
                     name=f"{schedule.name} ({current_date.isoformat()})",
                     department=schedule.department,
+                    allowed_roles=schedule.allowed_roles,
                     session_type=AttendanceSession.SessionType.MIXED,
                     start_time=start_dt,
                     end_time=end_dt,
@@ -196,6 +198,9 @@ def generate_sessions_from_schedule(
                     parent_schedule=schedule,
                     created_by=schedule.created_by,
                 )
+                session.allowed_departments.set(schedule.allowed_departments.all())
+                session.allowed_programs.set(schedule.allowed_programs.all())
+                session.allowed_sections.set(schedule.allowed_sections.all())
                 created_sessions.append(session)
 
         current_date += timedelta(days=1)
@@ -294,7 +299,73 @@ def get_session_by_qr_token(qr_token: str):
     Returning None means the QR token is unknown/invalid.
     """
     # Used by faculty preview/scan to map a scanned token back to one session.
-    return AttendanceSession.objects.filter(qr_token=qr_token).first()
+    return AttendanceSession.objects.prefetch_related(
+        "allowed_departments",
+        "allowed_programs",
+        "allowed_sections",
+    ).filter(qr_token=qr_token).first()
+
+
+def user_matches_session_audience(*, user, session) -> tuple[bool, str]:
+    if not user.department_id:
+        return False, "Your profile does not have an active department assignment."
+
+    if user.role == "faculty":
+        if session.allowed_roles == AttendanceSession.AllowedRole.STUDENT:
+            return False, "This session is not available to faculty."
+    elif user.role == "student":
+        if not user.program_id:
+            return False, "Your profile does not have an active program assignment."
+        if not Program.objects.filter(id=user.program_id, department_id=user.department_id, is_active=True, is_archived=False).exists():
+            return False, "Your program is inactive or invalid for attendance."
+        if session.allowed_roles == AttendanceSession.AllowedRole.FACULTY:
+            return False, "This session is not available to students."
+    else:
+        return False, "Your account role is not allowed for attendance."
+
+    allowed_department_ids = list(session.allowed_departments.values_list("id", flat=True))
+    if session.department_id and session.department_id not in allowed_department_ids:
+        allowed_department_ids.append(session.department_id)
+    if allowed_department_ids and user.department_id not in allowed_department_ids:
+        return False, "Your department is not allowed for this session."
+
+    if user.role == "student":
+        allowed_program_ids = list(session.allowed_programs.values_list("id", flat=True))
+        if allowed_program_ids and user.program_id not in allowed_program_ids:
+            return False, "Your program is not allowed for this session."
+        if session.allowed_sections.exists() and not session.allowed_sections.filter(
+            program_id=user.program_id,
+            is_active=True,
+            is_archived=False,
+        ).exists():
+            return False, "No active sections are available for your program in this session."
+
+    return True, ""
+
+
+def get_allowed_sections_for_user(*, user, session):
+    if user.role != "student" or not user.program_id:
+        return Section.objects.none()
+    return session.allowed_sections.filter(
+        program_id=user.program_id,
+        is_active=True,
+        is_archived=False,
+    ).order_by("name")
+
+
+def validate_attendance_section(*, user, session, section_id):
+    session_requires_section = session.allowed_sections.exists()
+    if not session_requires_section:
+        return None
+    if user.role != "student":
+        return None
+    if not section_id:
+        raise ValueError("Section selection is required for this session.")
+
+    section = get_allowed_sections_for_user(user=user, session=session).filter(id=section_id).first()
+    if not section:
+        raise ValueError("Selected section is invalid, inactive, or not allowed for your program.")
+    return section
 
 
 def _is_action_allowed_now(*, session, attendance_type: str, now):
@@ -384,7 +455,7 @@ def get_session_action_state(*, user, session, reference_time=None):
     )
 
 
-def validate_session_for_scan(*, user, session, attendance_type: str, scanned_qr_token: str):
+def validate_session_for_scan(*, user, session, attendance_type: str, scanned_qr_token: str, section_id=None):
     """
     Validate all scan rules before we create an attendance record.
 
@@ -428,10 +499,11 @@ def validate_session_for_scan(*, user, session, attendance_type: str, scanned_qr
             lifecycle_status=lifecycle_status,
         )
 
-    if session.department_id is not None and user.department_id != session.department_id:
+    audience_allowed, audience_message = user_matches_session_audience(user=user, session=session)
+    if not audience_allowed:
         return ScanValidationResult(
             is_valid=False,
-            message=f"This session is only available to the {session.department.name} department.",
+            message=audience_message,
             http_status=403,
             lifecycle_status=lifecycle_status,
         )
@@ -515,6 +587,16 @@ def validate_session_for_scan(*, user, session, attendance_type: str, scanned_qr
             lifecycle_status=lifecycle_status,
         )
 
+    try:
+        section = validate_attendance_section(user=user, session=session, section_id=section_id)
+    except ValueError as exc:
+        return ScanValidationResult(
+            is_valid=False,
+            message=str(exc),
+            http_status=400,
+            lifecycle_status=lifecycle_status,
+        )
+
     is_late = (
         requested_type == AttendanceRecord.AttendanceType.CHECK_IN
         and session.late_threshold_time is not None
@@ -525,10 +607,11 @@ def validate_session_for_scan(*, user, session, attendance_type: str, scanned_qr
         resolved_attendance_type=requested_type,
         is_late=is_late,
         lifecycle_status=lifecycle_status,
+        section=section,
     )
 
 
-def create_signed_attendance_record(*, user, session, attendance_type: str, is_late: bool):
+def create_signed_attendance_record(*, user, session, attendance_type: str, is_late: bool, section=None):
     """
     Create and sign an attendance record in one atomic transaction.
 
@@ -542,6 +625,7 @@ def create_signed_attendance_record(*, user, session, attendance_type: str, is_l
         record = AttendanceRecord.objects.create(
             user=user,
             session=session,
+            section=section,
             attendance_type=attendance_type,
             status=AttendanceRecord.Status.RECORDED,
             is_late=is_late,

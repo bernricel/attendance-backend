@@ -13,3 +13,14 @@ class IsFacultyRole(BasePermission):
 
     def has_permission(self, request, view):
         return bool(request.user and request.user.is_authenticated and request.user.role == "faculty")
+
+
+class IsAttendanceParticipantRole(BasePermission):
+    message = "Faculty or student role is required for this endpoint."
+
+    def has_permission(self, request, view):
+        return bool(
+            request.user
+            and request.user.is_authenticated
+            and request.user.role in {"faculty", "student"}
+        )

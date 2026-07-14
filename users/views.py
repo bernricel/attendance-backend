@@ -6,10 +6,16 @@ from rest_framework.authtoken.models import Token
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from attendance.models import Department
+from attendance.models import Department, Program
 from .google_auth import GoogleAuthError, verify_google_id_token
 from .models import User
-from .serializers import AdminLoginSerializer, CompleteProfileSerializer, GoogleLoginSerializer, UserSerializer
+from .serializers import (
+    AdminLoginSerializer,
+    CompleteProfileSerializer,
+    GoogleLoginSerializer,
+    ProfileUpdateSerializer,
+    UserSerializer,
+)
 
 
 def split_google_name(full_name):
@@ -25,6 +31,11 @@ def split_google_name(full_name):
     first_name = parts[0]
     last_name = " ".join(parts[1:]) if len(parts) > 1 else ""
     return first_name, last_name
+
+
+def resolve_google_user_role(email: str) -> str:
+    normalized_email = (email or "").lower()
+    return User.Role.STUDENT if ".student@" in normalized_email else User.Role.FACULTY
 
 
 class GoogleLoginView(APIView):
@@ -75,13 +86,14 @@ class GoogleLoginView(APIView):
 
         first_name, last_name = split_google_name(google_name)
 
-        # First-time Google login auto-creates a faculty account.
+        resolved_role = resolve_google_user_role(google_email)
+
         user, created = User.objects.get_or_create(
             email=google_email,
             defaults={
                 "first_name": first_name,
                 "last_name": last_name,
-                "role": User.Role.FACULTY,
+                "role": resolved_role,
             },
         )
 
@@ -98,12 +110,19 @@ class GoogleLoginView(APIView):
                     },
                     status=status.HTTP_403_FORBIDDEN,
                 )
-            # Backfill missing names for existing users without overwriting existing values.
             update_fields = []
-            if not user.first_name and first_name:
+            if user.role != resolved_role:
+                user.role = resolved_role
+                update_fields.append("role")
+            if resolved_role == User.Role.FACULTY and user.program_id is not None:
+                user.program = None
+                update_fields.append("program")
+
+            # Verified Google profile is the source of truth for name fields.
+            if first_name and user.first_name != first_name:
                 user.first_name = first_name
                 update_fields.append("first_name")
-            if not user.last_name and last_name:
+            if last_name != user.last_name:
                 user.last_name = last_name
                 update_fields.append("last_name")
             if update_fields:
@@ -163,6 +182,38 @@ class ActiveDepartmentListView(APIView):
         departments = list(Department.objects.filter(is_active=True).order_by("name").values("id", "name"))
         return Response(
             {"success": True, "departments": departments},
+            status=status.HTTP_200_OK,
+        )
+
+
+class ActiveProgramListView(APIView):
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, department_id):
+        programs = list(
+            Program.objects.filter(
+                department_id=department_id,
+                is_active=True,
+                is_archived=False,
+            ).order_by("code", "name").values("id", "name", "code", "department_id")
+        )
+        return Response({"success": True, "programs": programs}, status=status.HTTP_200_OK)
+
+
+class ProfileView(APIView):
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        return Response({"success": True, "user": UserSerializer(request.user).data}, status=status.HTTP_200_OK)
+
+    def patch(self, request):
+        serializer = ProfileUpdateSerializer(instance=request.user, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(
+            {"success": True, "message": "Profile updated successfully.", "user": UserSerializer(request.user).data},
             status=status.HTTP_200_OK,
         )
 

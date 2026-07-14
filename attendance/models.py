@@ -25,6 +25,61 @@ class Department(models.Model):
         return self.name
 
 
+class Program(models.Model):
+    department = models.ForeignKey(
+        "Department",
+        on_delete=models.PROTECT,
+        related_name="programs",
+    )
+    name = models.CharField(max_length=255)
+    code = models.CharField(max_length=50)
+    is_active = models.BooleanField(default=True)
+    is_archived = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("department__name", "code", "name")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("department", "name"),
+                name="unique_program_name_per_department",
+            ),
+            models.UniqueConstraint(
+                fields=("department", "code"),
+                name="unique_program_code_per_department",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.department.name} - {self.code}"
+
+
+class Section(models.Model):
+    program = models.ForeignKey(
+        "Program",
+        on_delete=models.PROTECT,
+        related_name="sections",
+    )
+    name = models.CharField(max_length=50)
+    is_active = models.BooleanField(default=True)
+    is_archived = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("program__code", "name")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("program", "name"),
+                name="unique_section_name_per_program",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.program.code}-{self.name}"
+
+
 class AttendanceSchedule(models.Model):
     class RecurrencePattern(models.TextChoices):
         WEEKDAYS = "weekdays", "Monday to Friday"
@@ -42,6 +97,10 @@ class AttendanceSchedule(models.Model):
         null=True,
         blank=True,
     )
+    allowed_roles = models.CharField(max_length=20, default="both")
+    allowed_departments = models.ManyToManyField("Department", related_name="schedule_audiences", blank=True)
+    allowed_programs = models.ManyToManyField("Program", related_name="schedule_audiences", blank=True)
+    allowed_sections = models.ManyToManyField("Section", related_name="schedule_audiences", blank=True)
     # Scheduled session span for the class/workday.
     start_time = models.TimeField()
     end_time = models.TimeField()
@@ -83,6 +142,11 @@ class AttendanceSession(models.Model):
         CHECK_OUT = "check-out", "Check-out"
         MIXED = "mixed", "Mixed"
 
+    class AllowedRole(models.TextChoices):
+        FACULTY = "faculty", "Faculty"
+        STUDENT = "student", "Student"
+        BOTH = "both", "Both"
+
     name = models.CharField(max_length=255)
     # Mixed sessions expose both check-in and check-out windows in one occurrence.
     session_type = models.CharField(max_length=20, choices=SessionType.choices, default=SessionType.MIXED)
@@ -93,6 +157,14 @@ class AttendanceSession(models.Model):
         null=True,
         blank=True,
     )
+    allowed_roles = models.CharField(
+        max_length=20,
+        choices=AllowedRole.choices,
+        default=AllowedRole.BOTH,
+    )
+    allowed_departments = models.ManyToManyField("Department", related_name="session_audiences", blank=True)
+    allowed_programs = models.ManyToManyField("Program", related_name="session_audiences", blank=True)
+    allowed_sections = models.ManyToManyField("Section", related_name="session_audiences", blank=True)
     # Scheduled session span.
     start_time = models.DateTimeField()
     end_time = models.DateTimeField()
@@ -213,6 +285,13 @@ class AttendanceRecord(models.Model):
         AttendanceSession,
         on_delete=models.CASCADE,
         related_name="attendance_records",
+    )
+    section = models.ForeignKey(
+        "Section",
+        on_delete=models.PROTECT,
+        related_name="attendance_records",
+        null=True,
+        blank=True,
     )
     check_time = models.DateTimeField(auto_now_add=True)
     attendance_type = models.CharField(max_length=20, choices=AttendanceType.choices)
