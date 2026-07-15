@@ -220,6 +220,7 @@ def _build_attendance_sheet_rows(*, filters):
                 "time_in": None,
                 "time_out": None,
                 "attendance_status": ATTENDANCE_STATUS_LABELS["incomplete"],
+                "late_status": ATTENDANCE_STATUS_LABELS["incomplete"],
                 "signature_status": "invalid",
                 "_check_in_is_late": False,
                 "_check_in_signature_valid": None,
@@ -250,6 +251,13 @@ def _build_attendance_sheet_rows(*, filters):
             )
         else:
             row["attendance_status"] = ATTENDANCE_STATUS_LABELS["incomplete"]
+
+        if has_check_in:
+            row["late_status"] = (
+                ATTENDANCE_STATUS_LABELS["late"]
+                if row["_check_in_is_late"]
+                else ATTENDANCE_STATUS_LABELS["on_time"]
+            )
 
         signature_values = [row["_check_in_signature_valid"], row["_check_out_signature_valid"]]
         present_signatures = [value for value in signature_values if value is not None]
