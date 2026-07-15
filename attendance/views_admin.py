@@ -1113,6 +1113,16 @@ class AdminManualAttendanceView(APIView):
             "program": user.program.name if user.program else "",
         }
 
+    def _serialize_action_state(self, action_state):
+        return {
+            "has_checked_in": action_state.has_checked_in,
+            "has_checked_out": action_state.has_checked_out,
+            "attendance_completed": action_state.has_checked_in and action_state.has_checked_out,
+            "next_valid_action": action_state.next_valid_action,
+            "next_action": action_state.next_valid_action,
+            "action_message": action_state.message,
+        }
+
     def get(self, request, session_id):
         serializer = ManualAttendanceLookupSerializer(data=request.query_params)
         serializer.is_valid(raise_exception=True)
@@ -1134,7 +1144,7 @@ class AdminManualAttendanceView(APIView):
             {
                 "success": True,
                 "user": self._serialize_user(user),
-                "next_valid_action": action_state.next_valid_action,
+                **self._serialize_action_state(action_state),
                 "message": action_state.message,
             },
             status=status.HTTP_200_OK,
@@ -1159,7 +1169,7 @@ class AdminManualAttendanceView(APIView):
         validation = validate_session_for_scan(
             user=user,
             session=session,
-            attendance_type=serializer.validated_data.get("attendance_type", ""),
+            attendance_type="",
             scanned_qr_token=session.qr_token,
             section_id=serializer.validated_data.get("section_id"),
             enforce_qr_token=False,
@@ -1176,11 +1186,13 @@ class AdminManualAttendanceView(APIView):
             is_manual=True,
             manually_recorded_by=request.user,
         )
+        action_state = get_session_action_state(user=user, session=session)
         return Response(
             {
                 "success": True,
-                "message": "Manual attendance recorded successfully.",
                 "user": self._serialize_user(user),
+                **self._serialize_action_state(action_state),
+                "message": f"Manual {validation.resolved_attendance_type.replace('-', ' ')} recorded successfully.",
                 "record": AttendanceRecordSerializer(record).data,
             },
             status=status.HTTP_201_CREATED,
