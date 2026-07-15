@@ -206,9 +206,10 @@ CORS_ALLOWED_ORIGINS = _get_list_env(
 )
 
 BACKEND_BASE_URL = _get_env("BACKEND_BASE_URL", "")
+FRONTEND_URL = _get_env("FRONTEND_URL", "")
 WEB_APP_BASE_URL = _get_env(
     "WEB_APP_BASE_URL",
-    CORS_ALLOWED_ORIGINS[0] if CORS_ALLOWED_ORIGINS else BACKEND_BASE_URL,
+    FRONTEND_URL or (CORS_ALLOWED_ORIGINS[0] if CORS_ALLOWED_ORIGINS else BACKEND_BASE_URL),
 )
 
 # CSRF trusted origins should include deployed frontend origins in production.

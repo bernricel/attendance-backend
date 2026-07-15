@@ -12,6 +12,7 @@ from users.models import User
 
 @override_settings(
     BACKEND_BASE_URL="https://attendance.example.com",
+    FRONTEND_URL="https://app.example.com",
     WEB_APP_BASE_URL="https://app.example.com",
 )
 class AttendanceApiTests(APITestCase):
@@ -96,7 +97,7 @@ class AttendanceApiTests(APITestCase):
         self.assertEqual(response.data["session"]["qr_refresh_interval_seconds"], 45)
         self.assertEqual(
             response.data["session"]["qr_url"],
-            f"https://attendance.example.com/scan/{response.data['session']['qr_token']}",
+            f"https://app.example.com/scan/{response.data['session']['qr_token']}",
         )
         self.assertIsNone(response.data["session"]["late_threshold_time"])
 
@@ -353,7 +354,7 @@ class AttendanceApiTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["session"]["id"], session.id)
-        self.assertEqual(response.data["session"]["qr_url"], f"https://attendance.example.com/scan/{session.qr_token}")
+        self.assertEqual(response.data["session"]["qr_url"], f"https://app.example.com/scan/{session.qr_token}")
 
     def test_preview_accepts_same_token_from_backend_or_web_scan_url(self):
         session = self._create_rule_session(name="Unified QR Session")
@@ -458,7 +459,7 @@ class AttendanceApiTests(APITestCase):
         response = self.client.get(f"/scan/{session.qr_token}")
 
         self.assertEqual(response.status_code, status.HTTP_302_FOUND)
-        self.assertEqual(response["Location"], f"https://app.example.com/faculty/scan/{session.qr_token}")
+        self.assertEqual(response["Location"], f"https://app.example.com/scan/{session.qr_token}")
 
     def test_admin_qr_status_returns_current_rotating_token(self):
         session = self._create_rule_session(

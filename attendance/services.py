@@ -258,18 +258,25 @@ def get_session_qr_status(session, *, rotate_if_expired=False, reference_time=No
 
 
 def build_session_qr_url(qr_token: str) -> str:
-    base_url = (getattr(settings, "BACKEND_BASE_URL", "") or "").rstrip("/")
+    base_url = (
+        getattr(settings, "FRONTEND_URL", "")
+        or getattr(settings, "WEB_APP_BASE_URL", "")
+        or getattr(settings, "BACKEND_BASE_URL", "")
+        or ""
+    ).rstrip("/")
     scan_path = f"/scan/{qr_token}"
     return f"{base_url}{scan_path}" if base_url else scan_path
 
 
 def build_webapp_scan_url(qr_token: str) -> str:
     base_url = (
+        getattr(settings, "FRONTEND_URL", "")
+        or
         getattr(settings, "WEB_APP_BASE_URL", "")
         or getattr(settings, "BACKEND_BASE_URL", "")
         or ""
     ).rstrip("/")
-    scan_path = f"/faculty/scan/{qr_token}"
+    scan_path = f"/scan/{qr_token}"
     return f"{base_url}{scan_path}" if base_url else scan_path
 
 
