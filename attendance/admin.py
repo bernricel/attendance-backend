@@ -65,8 +65,10 @@ class AttendanceRecordAdmin(admin.ModelAdmin):
         "session",
         "attendance_type",
         "is_late",
+        "is_manual",
+        "manually_recorded_by",
         "status",
         "check_time",
     )
-    list_filter = ("attendance_type", "status")
-    search_fields = ("user__email", "session__name", "session__qr_token")
+    list_filter = ("attendance_type", "status", "is_manual")
+    search_fields = ("user__email", "user__school_id", "session__name", "session__qr_token", "manually_recorded_by__email")

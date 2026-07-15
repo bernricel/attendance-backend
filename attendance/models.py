@@ -299,6 +299,14 @@ class AttendanceRecord(models.Model):
     is_late = models.BooleanField(default=False)
     signed_payload = models.TextField(blank=True, default="")
     signature = models.TextField(blank=True, default="")
+    is_manual = models.BooleanField(default=False)
+    manually_recorded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="manual_attendance_records",
+        null=True,
+        blank=True,
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

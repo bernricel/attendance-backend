@@ -604,6 +604,8 @@ class AttendanceRecordSerializer(serializers.ModelSerializer):
             "is_late",
             "signed_payload",
             "signature",
+            "is_manual",
+            "manually_recorded_by",
         )
         read_only_fields = ("check_time", "status")
 
@@ -633,6 +635,25 @@ class ScanAttendanceSerializer(serializers.Serializer):
 class VerifySignatureSerializer(serializers.Serializer):
     # Simple input contract for /admin/verify-signature endpoint.
     attendance_record_id = serializers.IntegerField(required=True, min_value=1)
+
+
+class ManualAttendanceLookupSerializer(serializers.Serializer):
+    school_id = serializers.CharField(required=True, allow_blank=False, max_length=50)
+
+    def validate_school_id(self, value):
+        return value.strip()
+
+
+class ManualAttendanceCreateSerializer(serializers.Serializer):
+    school_id = serializers.CharField(required=True, allow_blank=False, max_length=50)
+    attendance_type = serializers.ChoiceField(
+        choices=AttendanceRecord.AttendanceType.choices,
+        required=False,
+    )
+    section_id = serializers.IntegerField(required=False, allow_null=True, min_value=1)
+
+    def validate_school_id(self, value):
+        return value.strip()
 
 
 class FacultySessionPreviewSerializer(serializers.ModelSerializer):

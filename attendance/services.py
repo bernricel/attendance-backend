@@ -462,7 +462,7 @@ def get_session_action_state(*, user, session, reference_time=None):
     )
 
 
-def validate_session_for_scan(*, user, session, attendance_type: str, scanned_qr_token: str, section_id=None):
+def validate_session_for_scan(*, user, session, attendance_type: str, scanned_qr_token: str, section_id=None, enforce_qr_token=True):
     """
     Validate all scan rules before we create an attendance record.
 
@@ -567,7 +567,7 @@ def validate_session_for_scan(*, user, session, attendance_type: str, scanned_qr
 
     # Step 3.5: QR token must be current for this session.
     # If expired, rotate immediately so only the new token remains valid.
-    if scanned_qr_token != session.qr_token or session.is_qr_token_expired(now):
+    if enforce_qr_token and (scanned_qr_token != session.qr_token or session.is_qr_token_expired(now)):
         rotate_session_qr_if_expired(session, reference_time=now)
         return ScanValidationResult(
             is_valid=False,
@@ -618,7 +618,7 @@ def validate_session_for_scan(*, user, session, attendance_type: str, scanned_qr
     )
 
 
-def create_signed_attendance_record(*, user, session, attendance_type: str, is_late: bool, section=None):
+def create_signed_attendance_record(*, user, session, attendance_type: str, is_late: bool, section=None, is_manual=False, manually_recorded_by=None):
     """
     Create and sign an attendance record in one atomic transaction.
 
@@ -636,6 +636,8 @@ def create_signed_attendance_record(*, user, session, attendance_type: str, is_l
             attendance_type=attendance_type,
             status=AttendanceRecord.Status.RECORDED,
             is_late=is_late,
+            is_manual=is_manual,
+            manually_recorded_by=manually_recorded_by,
         )
 
         # Step 2: build a deterministic payload from important record data.

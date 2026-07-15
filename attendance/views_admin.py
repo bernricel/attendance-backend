@@ -27,6 +27,8 @@ from .serializers import (
     CreateSessionSerializer,
     DepartmentSerializer,
     DepartmentWriteSerializer,
+    ManualAttendanceCreateSerializer,
+    ManualAttendanceLookupSerializer,
     ProgramSerializer,
     ProgramWriteSerializer,
     SectionSerializer,
@@ -36,10 +38,13 @@ from .serializers import (
 )
 from users.models import User
 from .services import (
+    create_signed_attendance_record,
     ensure_session_lifecycle_state,
     generate_sessions_from_schedule,
+    get_session_action_state,
     get_session_qr_status,
     is_record_signature_valid,
+    validate_session_for_scan,
 )
 
 
@@ -1083,4 +1088,100 @@ class SessionQrStatusView(APIView):
                 **qr_status,
             },
             status=status.HTTP_200_OK,
+        )
+
+
+class AdminManualAttendanceView(APIView):
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [permissions.IsAuthenticated, IsAdminRole]
+
+    def _get_session(self, session_id):
+        return AttendanceSession.objects.prefetch_related(
+            "allowed_departments",
+            "allowed_programs",
+            "allowed_sections",
+        ).filter(id=session_id).first()
+
+    def _serialize_user(self, user):
+        return {
+            "id": user.id,
+            "name": f"{user.first_name} {user.last_name}".strip() or user.email,
+            "email": user.email,
+            "school_id": user.school_id,
+            "role": user.role,
+            "department": user.department.name if user.department else "",
+            "program": user.program.name if user.program else "",
+        }
+
+    def get(self, request, session_id):
+        serializer = ManualAttendanceLookupSerializer(data=request.query_params)
+        serializer.is_valid(raise_exception=True)
+        session = self._get_session(session_id)
+        if not session:
+            return Response({"success": False, "message": "Attendance session not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        user = User.objects.select_related("department", "program").filter(
+            school_id__iexact=serializer.validated_data["school_id"],
+            is_active=True,
+        ).first()
+        if not user:
+            return Response({"success": False, "message": "School ID was not found."}, status=status.HTTP_404_NOT_FOUND)
+        if user.role == User.Role.ADMIN:
+            return Response({"success": False, "message": "Admins cannot be recorded for attendance sessions."}, status=status.HTTP_400_BAD_REQUEST)
+
+        action_state = get_session_action_state(user=user, session=session)
+        return Response(
+            {
+                "success": True,
+                "user": self._serialize_user(user),
+                "next_valid_action": action_state.next_valid_action,
+                "message": action_state.message,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    def post(self, request, session_id):
+        serializer = ManualAttendanceCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        session = self._get_session(session_id)
+        if not session:
+            return Response({"success": False, "message": "Attendance session not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        user = User.objects.select_related("department", "program").filter(
+            school_id__iexact=serializer.validated_data["school_id"],
+            is_active=True,
+        ).first()
+        if not user:
+            return Response({"success": False, "message": "School ID was not found."}, status=status.HTTP_404_NOT_FOUND)
+        if user.role == User.Role.ADMIN:
+            return Response({"success": False, "message": "Admins cannot be recorded for attendance sessions."}, status=status.HTTP_400_BAD_REQUEST)
+
+        validation = validate_session_for_scan(
+            user=user,
+            session=session,
+            attendance_type=serializer.validated_data.get("attendance_type", ""),
+            scanned_qr_token=session.qr_token,
+            section_id=serializer.validated_data.get("section_id"),
+            enforce_qr_token=False,
+        )
+        if not validation.is_valid:
+            return Response({"success": False, "message": validation.message}, status=validation.http_status)
+
+        record = create_signed_attendance_record(
+            user=user,
+            session=session,
+            attendance_type=validation.resolved_attendance_type,
+            is_late=validation.is_late,
+            section=validation.section,
+            is_manual=True,
+            manually_recorded_by=request.user,
+        )
+        return Response(
+            {
+                "success": True,
+                "message": "Manual attendance recorded successfully.",
+                "user": self._serialize_user(user),
+                "record": AttendanceRecordSerializer(record).data,
+            },
+            status=status.HTTP_201_CREATED,
         )

@@ -11,6 +11,7 @@ from .views_admin import (
     AdminProgramSectionListCreateView,
     AdminSectionDetailView,
     AttendanceByDateView,
+    AdminManualAttendanceView,
     AdminSessionListView,
     CreateSessionView,
     DeleteSessionView,
@@ -34,6 +35,7 @@ urlpatterns = [
     path("sessions/<int:session_id>/end", EndSessionView.as_view(), name="admin-end-session"),
     # Frontend polls this endpoint for rotating QR token status/countdown.
     path("sessions/<int:session_id>/qr-status", SessionQrStatusView.as_view(), name="admin-session-qr-status"),
+    path("sessions/<int:session_id>/manual-attendance", AdminManualAttendanceView.as_view(), name="admin-manual-attendance"),
     path("attendance-by-date", AttendanceByDateView.as_view(), name="admin-attendance-by-date"),
     path("faculty-attendance", FacultyAttendanceRecordsView.as_view(), name="admin-faculty-attendance"),
     path("attendance-sheet", AdminAttendanceSheetView.as_view(), name="admin-attendance-sheet"),
