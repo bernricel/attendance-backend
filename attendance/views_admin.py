@@ -501,6 +501,20 @@ class AdminDepartmentDetailView(APIView):
     authentication_classes = [TokenAuthentication]
     permission_classes = [permissions.IsAuthenticated, IsAdminRole]
 
+    def get(self, request, department_id):
+        try:
+            department = Department.objects.prefetch_related("programs__sections").get(id=department_id)
+        except Department.DoesNotExist:
+            return Response(
+                {"success": False, "message": "Department not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        return Response(
+            {"success": True, "department": DepartmentSerializer(department).data},
+            status=status.HTTP_200_OK,
+        )
+
     def patch(self, request, department_id):
         try:
             department = Department.objects.get(id=department_id)
