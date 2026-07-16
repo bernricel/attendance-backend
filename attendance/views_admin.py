@@ -1,5 +1,6 @@
 from datetime import time
 import csv
+import re
 
 from django.core.paginator import Paginator
 from django.http import HttpResponse
@@ -67,15 +68,45 @@ def _format_csv_time(value):
     return timezone.localtime(parsed).strftime("%I:%M %p").lstrip("0")
 
 
+def _format_report_datetime(value):
+    if not value:
+        return ""
+
+    parsed = parse_datetime(value) if isinstance(value, str) else value
+    if not parsed:
+        return ""
+
+    return timezone.localtime(parsed).strftime("%Y-%m-%d %I:%M %p").lstrip("0")
+
+
+def _get_account_type(email):
+    normalized_email = (email or "").strip().lower()
+    if ".student@ua.edu.ph" in normalized_email:
+        return "Student"
+    if normalized_email.endswith("@ua.edu.ph"):
+        return "Employee"
+    return "User"
+
+
+def _sanitize_export_filename(value):
+    sanitized = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", str(value or ""))
+    sanitized = re.sub(r"\s+", "_", sanitized.strip())
+    sanitized = re.sub(r"_+", "_", sanitized)
+    return sanitized or "SyncIn_Attendance_Report"
+
+
+def _build_export_filename(*, filters, extension, generated_at=None):
+    report_date = filters.get("date") or timezone.localdate(generated_at or timezone.now())
+    filename_parts = ["SyncIn_Attendance_Report", report_date.isoformat()]
+    if filters.get("session_id"):
+        filename_parts.append(f"Session_{filters['session_id']}")
+    return f"{_sanitize_export_filename('_'.join(filename_parts))}.{extension}"
+
+
 def _pdf_escape(value):
     text = str(value or "")
-    return (
-        text.replace("\\", "\\\\")
-        .replace("(", "\\(")
-        .replace(")", "\\)")
-        .encode("latin-1", "replace")
-        .decode("latin-1")
-    )
+    encoded_text = text.encode("cp1252", "replace").decode("latin-1")
+    return encoded_text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
 
 
 def _truncate_pdf_text(value, max_length):
@@ -83,36 +114,119 @@ def _truncate_pdf_text(value, max_length):
     return text if len(text) <= max_length else f"{text[: max_length - 1]}..."
 
 
-def _build_simple_pdf(title, rows):
-    line_height = 14
+def _pdf_color(color):
+    return " ".join(f"{value:.3f}" for value in color)
+
+
+def _pdf_text(commands, x, y, text, *, size=8, font="F1", color=(0, 0, 0)):
+    commands.extend(
+        [
+            f"{_pdf_color(color)} rg",
+            "BT",
+            f"/{font} {size:.1f} Tf",
+            f"{x:.1f} {y:.1f} Td",
+            f"({_pdf_escape(text)}) Tj",
+            "ET",
+        ]
+    )
+
+
+def _pdf_rect(commands, x, y, width, height, *, fill=None, stroke=None, line_width=0.6):
+    commands.append("q")
+    if fill:
+        commands.append(f"{_pdf_color(fill)} rg")
+        commands.append(f"{x:.1f} {y:.1f} {width:.1f} {height:.1f} re f")
+    if stroke:
+        commands.append(f"{_pdf_color(stroke)} RG")
+        commands.append(f"{line_width:.1f} w")
+        commands.append(f"{x:.1f} {y:.1f} {width:.1f} {height:.1f} re S")
+    commands.append("Q")
+
+
+def _pdf_line(commands, x1, y1, x2, y2, *, color=(0.82, 0.85, 0.9), line_width=0.5):
+    commands.extend(
+        [
+            "q",
+            f"{_pdf_color(color)} RG",
+            f"{line_width:.1f} w",
+            f"{x1:.1f} {y1:.1f} m",
+            f"{x2:.1f} {y2:.1f} l",
+            "S",
+            "Q",
+        ]
+    )
+
+
+def _pdf_fit_text(value, width, *, font_size=6.6):
+    max_chars = max(3, int(width / (font_size * 0.52)))
+    return _truncate_pdf_text(value, max_chars)
+
+
+def _build_simple_pdf(title, rows, *, filters=None, generated_at=None):
+    filters = filters or {}
+    generated_at = generated_at or timezone.now()
+    generated_display = _format_report_datetime(generated_at)
     page_width = 842
     page_height = 595
-    margin_x = 32
-    start_y = 548
-    max_lines_per_page = 34
+    margin_x = 28
+    table_width = page_width - (margin_x * 2)
+    row_height = 20
+    table_header_height = 22
+    bottom_y = 62
+    first_table_top = 406
+    next_table_top = 500
 
-    lines = [title, f"Generated: {timezone.localtime(timezone.now()).strftime('%Y-%m-%d %I:%M %p')}", ""]
-    lines.append("Faculty | Email | Session | Time In | Time Out | Attendance | Signature")
-    lines.append("-" * 132)
-    if rows:
-        for row in rows:
-            lines.append(
-                " | ".join(
-                    [
-                        _truncate_pdf_text(row.get("faculty_name"), 20),
-                        _truncate_pdf_text(row.get("email"), 24),
-                        _truncate_pdf_text(row.get("session_name"), 24),
-                        _format_csv_time(row.get("time_in")) or "-",
-                        _format_csv_time(row.get("time_out")) or "-",
-                        _truncate_pdf_text(row.get("attendance_status"), 14),
-                        _truncate_pdf_text(row.get("signature_status"), 10),
-                    ]
-                )
-            )
-    else:
-        lines.append("No attendance records match the selected filters.")
+    navy = (0.035, 0.118, 0.231)
+    maroon = (0.455, 0.047, 0.125)
+    mustard = (0.882, 0.647, 0.129)
+    text_color = (0.094, 0.118, 0.157)
+    muted = (0.376, 0.431, 0.518)
+    border = (0.800, 0.835, 0.890)
+    row_fill = (0.965, 0.973, 0.984)
+    white = (1, 1, 1)
 
-    page_chunks = [lines[index : index + max_lines_per_page] for index in range(0, len(lines), max_lines_per_page)]
+    columns = [
+        ("number", "No.", 31),
+        ("faculty_name", "Name", 95),
+        ("email", "Email", 150),
+        ("account_type", "Account Type", 65),
+        ("session_name", "Session", 115),
+        ("date", "Date", 62),
+        ("time_in", "Time In", 55),
+        ("time_out", "Time Out", 55),
+        ("attendance_status", "Attendance Status", 82),
+        ("signature_status", "Signature Status", 76),
+    ]
+
+    table_rows = []
+    for index, row in enumerate(rows, start=1):
+        table_rows.append(
+            {
+                "number": str(index),
+                "faculty_name": row.get("faculty_name", ""),
+                "email": row.get("email", ""),
+                "account_type": _get_account_type(row.get("email", "")),
+                "session_name": row.get("session_name", ""),
+                "date": row.get("date", ""),
+                "time_in": _format_csv_time(row.get("time_in")) or "-",
+                "time_out": _format_csv_time(row.get("time_out")) or "-",
+                "attendance_status": row.get("attendance_status", ""),
+                "signature_status": row.get("signature_status", ""),
+            }
+        )
+
+    first_page_capacity = max(1, int((first_table_top - bottom_y - table_header_height) / row_height))
+    next_page_capacity = max(1, int((next_table_top - bottom_y - table_header_height) / row_height))
+    page_chunks = []
+    remaining_rows = table_rows
+    page_chunks.append(remaining_rows[:first_page_capacity])
+    remaining_rows = remaining_rows[first_page_capacity:]
+    while remaining_rows:
+        page_chunks.append(remaining_rows[:next_page_capacity])
+        remaining_rows = remaining_rows[next_page_capacity:]
+    if not page_chunks:
+        page_chunks = [[]]
+
     objects = []
 
     def add_object(content):
@@ -121,26 +235,97 @@ def _build_simple_pdf(title, rows):
 
     catalog_id = add_object("<< /Type /Catalog /Pages 2 0 R >>")
     pages_id = add_object("")
-    font_id = add_object("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    font_id = add_object("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>")
+    bold_font_id = add_object("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>")
     page_ids = []
 
-    for page_number, chunk in enumerate(page_chunks, start=1):
-        stream_lines = [
-            "BT",
-            f"/F1 9 Tf",
-            f"{margin_x} {start_y} Td",
-            f"({ _pdf_escape(f'Page {page_number} of {len(page_chunks)}') }) Tj",
-            f"0 -{line_height} Td",
+    def render_brand_header(commands, *, page_number, table_top):
+        _pdf_rect(commands, 0, page_height - 22, page_width, 22, fill=navy)
+        _pdf_rect(commands, 0, page_height - 25, page_width, 3, fill=mustard)
+        _pdf_rect(commands, margin_x, page_height - 88, 4, 42, fill=maroon)
+        _pdf_text(commands, margin_x + 14, page_height - 58, "Sync In", size=22, font="F2", color=navy)
+        _pdf_text(commands, margin_x + 16, page_height - 74, "Event Management System", size=8.5, font="F2", color=muted)
+        _pdf_text(commands, margin_x, page_height - 108, title, size=14, font="F2", color=text_color)
+        _pdf_text(commands, margin_x, page_height - 122, f"Generated: {generated_display}", size=8, color=muted)
+        _pdf_text(commands, page_width - 105, page_height - 122, f"Page {page_number} of {len(page_chunks)}", size=8, color=muted)
+        _pdf_line(commands, margin_x, table_top + 28, page_width - margin_x, table_top + 28, color=border)
+
+    def render_summary(commands):
+        if not rows:
+            return
+
+        date_filter = filters.get("date").isoformat() if filters.get("date") else "All dates"
+        if filters.get("session_id"):
+            session_filter = rows[0].get("session_name") if rows else f"Session {filters['session_id']}"
+        else:
+            session_filter = "All sessions"
+
+        cards = [
+            ("Total Records", str(len(rows))),
+            ("Date Filter", date_filter),
+            ("Session Filter", session_filter),
         ]
-        for line in chunk:
-            stream_lines.append(f"({_pdf_escape(line)}) Tj")
-            stream_lines.append(f"0 -{line_height} Td")
-        stream_lines.append("ET")
+        card_width = (table_width - 20) / 3
+        y = 448
+        for index, (label, value) in enumerate(cards):
+            x = margin_x + (index * (card_width + 10))
+            _pdf_rect(commands, x, y, card_width, 42, fill=(0.984, 0.988, 0.996), stroke=border)
+            _pdf_text(commands, x + 10, y + 26, label, size=7.2, font="F2", color=muted)
+            _pdf_text(commands, x + 10, y + 11, _pdf_fit_text(value, card_width - 20, font_size=9.2), size=9.2, font="F2", color=text_color)
+
+    def render_table(commands, chunk, *, table_top):
+        header_y = table_top - table_header_height
+        _pdf_rect(commands, margin_x, header_y, table_width, table_header_height, fill=navy)
+        _pdf_rect(commands, margin_x, header_y - 3, table_width, 3, fill=mustard)
+        x = margin_x
+        for key, label, width in columns:
+            _pdf_text(commands, x + 4, header_y + 8, _pdf_fit_text(label, width - 8, font_size=6.7), size=6.7, font="F2", color=white)
+            x += width
+
+        y = header_y - row_height
+        if not table_rows:
+            _pdf_rect(commands, margin_x, y, table_width, row_height, fill=(0.984, 0.988, 0.996), stroke=border)
+            _pdf_text(commands, margin_x + 10, y + 7, "No attendance records match the selected filters.", size=8, color=muted)
+            return
+
+        for row_index, row in enumerate(chunk):
+            if row_index % 2:
+                _pdf_rect(commands, margin_x, y, table_width, row_height, fill=row_fill)
+            _pdf_line(commands, margin_x, y, page_width - margin_x, y, color=border)
+            x = margin_x
+            for key, label, width in columns:
+                value = _pdf_fit_text(row.get(key, ""), width - 8)
+                color = text_color
+                font = "F1"
+                if key == "signature_status" and str(row.get(key, "")).lower() == "invalid":
+                    color = maroon
+                    font = "F2"
+                elif key == "attendance_status" and str(row.get(key, "")).lower() == "late":
+                    color = maroon
+                    font = "F2"
+                _pdf_text(commands, x + 4, y + 7, value, size=6.6, font=font, color=color)
+                x += width
+            y -= row_height
+        _pdf_line(commands, margin_x, y + row_height, page_width - margin_x, y + row_height, color=border)
+
+    def render_footer(commands):
+        _pdf_line(commands, margin_x, 44, page_width - margin_x, 44, color=border)
+        _pdf_text(commands, margin_x, 28, "Sync In \u2022 Secure QR Attendance", size=8, font="F2", color=navy)
+        _pdf_text(commands, page_width - 190, 28, "\xa9 2026 Sync In. All rights reserved.", size=8, color=muted)
+
+    for page_number, chunk in enumerate(page_chunks, start=1):
+        stream_lines = []
+        table_top = first_table_top if page_number == 1 else next_table_top
+        render_brand_header(stream_lines, page_number=page_number, table_top=table_top)
+        if page_number == 1:
+            render_summary(stream_lines)
+        render_table(stream_lines, chunk, table_top=table_top)
+        render_footer(stream_lines)
         stream = "\n".join(stream_lines).encode("latin-1", "replace")
         content_id = add_object(f"<< /Length {len(stream)} >>\nstream\n{stream.decode('latin-1')}\nendstream")
         page_id = add_object(
             f"<< /Type /Page /Parent {pages_id} 0 R /MediaBox [0 0 {page_width} {page_height}] "
-            f"/Resources << /Font << /F1 {font_id} 0 R >> >> /Contents {content_id} 0 R >>"
+            f"/Resources << /Font << /F1 {font_id} 0 R /F2 {bold_font_id} 0 R >> >> /Contents {content_id} 0 R >>"
         )
         page_ids.append(page_id)
 
@@ -875,13 +1060,9 @@ class AdminAttendanceSheetExportCsvView(APIView):
         query_serializer.is_valid(raise_exception=True)
         filters = query_serializer.validated_data
         rows = _build_attendance_sheet_rows(filters=filters)
+        generated_at = timezone.now()
 
-        filename_parts = ["attendance_sheet"]
-        if filters.get("session_id"):
-            filename_parts.append(f"session_{filters['session_id']}")
-        if filters.get("date"):
-            filename_parts.append(filters["date"].isoformat())
-        filename = "_".join(filename_parts) + ".csv"
+        filename = _build_export_filename(filters=filters, extension="csv", generated_at=generated_at)
 
         response = HttpResponse(content_type="text/csv; charset=utf-8")
         response["Content-Disposition"] = f'attachment; filename="{filename}"'
@@ -890,25 +1071,34 @@ class AdminAttendanceSheetExportCsvView(APIView):
         writer = csv.writer(response)
         writer.writerow(
             [
-                "Faculty Name",
+                "No.",
+                "Name",
                 "Email",
+                "Account Type",
                 "Session",
+                "Date",
                 "Time In",
                 "Time Out",
                 "Attendance Status",
                 "Signature Status",
+                "Generated At",
             ]
         )
-        for row in rows:
+        generated_display = _format_report_datetime(generated_at)
+        for index, row in enumerate(rows, start=1):
             writer.writerow(
                 [
+                    index,
                     row["faculty_name"],
                     row["email"],
+                    _get_account_type(row["email"]),
                     row["session_name"],
+                    row["date"],
                     _format_csv_time(row["time_in"]),
                     _format_csv_time(row["time_out"]),
                     row["attendance_status"],
                     row["signature_status"],
+                    generated_display,
                 ]
             )
         return response
@@ -925,15 +1115,11 @@ class AdminAttendanceSheetExportPdfView(APIView):
         query_serializer.is_valid(raise_exception=True)
         filters = query_serializer.validated_data
         rows = _build_attendance_sheet_rows(filters=filters)
+        generated_at = timezone.now()
 
-        filename_parts = ["attendance_sheet"]
-        if filters.get("session_id"):
-            filename_parts.append(f"session_{filters['session_id']}")
-        if filters.get("date"):
-            filename_parts.append(filters["date"].isoformat())
-        filename = "_".join(filename_parts) + ".pdf"
+        filename = _build_export_filename(filters=filters, extension="pdf", generated_at=generated_at)
 
-        pdf_bytes = _build_simple_pdf("Sync In Attendance Sheet", rows)
+        pdf_bytes = _build_simple_pdf("Attendance Report", rows, filters=filters, generated_at=generated_at)
         response = HttpResponse(pdf_bytes, content_type="application/pdf")
         response["Content-Disposition"] = f'attachment; filename="{filename}"'
         return response

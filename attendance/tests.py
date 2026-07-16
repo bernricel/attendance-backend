@@ -1,4 +1,6 @@
 from datetime import timedelta
+import csv
+import json
 
 from django.test import override_settings
 from django.utils import timezone
@@ -461,6 +463,18 @@ class AttendanceApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_302_FOUND)
         self.assertEqual(response["Location"], f"https://app.example.com/scan/{session.qr_token}")
 
+    def test_assetlinks_json_route_is_public_json(self):
+        response = self.client.get("/.well-known/assetlinks.json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response["Content-Type"], "application/json")
+        payload = json.loads(response.content.decode("utf-8"))
+        self.assertEqual(payload[0]["target"]["package_name"], "ph.edu.ua.uacheckin")
+        self.assertEqual(
+            payload[0]["target"]["sha256_cert_fingerprints"],
+            ["F1:28:D6:DF:F6:B1:B7:DC:BC:14:7C:A5:92:06:48:05:0F:36:A6:DD:10:86:85:2D:2B:24:97:62:82:E8:A4:69"],
+        )
+
     def test_admin_qr_status_returns_current_rotating_token(self):
         session = self._create_rule_session(
             name="QR Status Session",
@@ -535,8 +549,45 @@ class AttendanceApiTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response["Content-Type"], "application/pdf")
-        self.assertIn("attendance_sheet.pdf", response["Content-Disposition"])
+        self.assertIn("SyncIn_Attendance_Report_", response["Content-Disposition"])
+        self.assertIn(".pdf", response["Content-Disposition"])
         self.assertTrue(response.content.startswith(b"%PDF-"))
+        self.assertIn(b"Attendance Report", response.content)
+
+    def test_admin_can_export_attendance_sheet_csv_with_report_columns(self):
+        session = self._create_rule_session(name="CSV Export Session", department=self.department)
+        AttendanceRecord.objects.create(
+            user=self.faculty_user,
+            session=session,
+            attendance_type=AttendanceRecord.AttendanceType.CHECK_IN,
+            is_late=False,
+        )
+
+        self._admin_auth()
+        response = self.client.get("/api/admin/attendance-sheet/export-csv")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response["Content-Type"], "text/csv; charset=utf-8")
+        self.assertIn("SyncIn_Attendance_Report_", response["Content-Disposition"])
+        csv_rows = list(csv.reader(response.content.decode("utf-8-sig").splitlines()))
+        self.assertEqual(
+            csv_rows[0],
+            [
+                "No.",
+                "Name",
+                "Email",
+                "Account Type",
+                "Session",
+                "Date",
+                "Time In",
+                "Time Out",
+                "Attendance Status",
+                "Signature Status",
+                "Generated At",
+            ],
+        )
+        self.assertEqual(csv_rows[1][3], "Employee")
+        self.assertEqual(csv_rows[1][4], "CSV Export Session")
 
     def test_delete_session_requires_correct_admin_password(self):
         session = self._create_rule_session(name="Protected Session")
