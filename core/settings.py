@@ -48,8 +48,12 @@ def _get_list_env(name: str, default: str = "") -> list[str]:
 def _normalize_multiline_secret(value: str) -> str:
     """
     Convert escaped newline sequences into real newlines for PEM/env secrets.
+
+    VPS control panels sometimes preserve leading/trailing whitespace when
+    secrets are pasted. Trimming here keeps PEM parsing deterministic while
+    still allowing escaped-newline env values.
     """
-    return value.replace("\\n", "\n")
+    return value.replace("\\n", "\n").strip()
 
 
 # Quick-start development settings - unsuitable for production
@@ -199,7 +203,9 @@ REST_FRAMEWORK = {
     ],
 }
 
-# Frontend origins for development; adjust for production deployment.
+# Frontend origins are env-configured as a comma-separated list.
+# Production should include https://syncin.ua-cit.com and may include local
+# Vite origins for controlled testing. Do not enable CORS_ALLOW_ALL_ORIGINS.
 CORS_ALLOWED_ORIGINS = _get_list_env(
     "CORS_ALLOWED_ORIGINS",
     "http://localhost:5173,http://127.0.0.1:5173",
@@ -212,7 +218,7 @@ WEB_APP_BASE_URL = _get_env(
     FRONTEND_URL or (CORS_ALLOWED_ORIGINS[0] if CORS_ALLOWED_ORIGINS else BACKEND_BASE_URL),
 )
 
-# CSRF trusted origins should include deployed frontend origins in production.
+# CSRF trusted origins use the same comma-separated env format as CORS.
 CSRF_TRUSTED_ORIGINS = _get_list_env("CSRF_TRUSTED_ORIGINS", "")
 
 GOOGLE_OAUTH_CLIENT_ID = _get_env("GOOGLE_OAUTH_CLIENT_ID", "")
