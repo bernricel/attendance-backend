@@ -32,8 +32,9 @@ def assetlinks_json(request):
                     "namespace": "android_app",
                     "package_name": "ph.edu.ua.uacheckin",
                     "sha256_cert_fingerprints": [
-                        "F1:28:D6:DF:F6:B1:B7:DC:BC:14:7C:A5:92:06:48:05:0F:36:A6:DD:10:86:85:2D:2B:24:97:62:82:E8:A4:69",
-                    ],
+    "F1:28:D6:DF:F6:B1:B7:DC:BC:14:7C:A5:92:06:48:05:0F:36:A6:DD:10:86:85:2D:2B:24:97:62:82:E8:A4:69",
+    "F4:48:70:48:07:AC:90:F9:91:A7:70:B2:49:8E:7E:2A:3E:C0:BF:8F:D2:46:22:96:B2:ED:BA:61:8D:64:B2:2A",
+],
                 },
             },
         ],
